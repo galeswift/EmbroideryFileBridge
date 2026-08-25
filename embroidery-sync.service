@@ -1,0 +1,9 @@
+[Unit]
+Description=Sync staged embroidery files onto the machine
+# Avoid piling up overlapping runs if udev fires rapidly (e.g. sda then
+# sda1 events); embroidery-sync.sh also takes its own lock.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/embroidery-sync.sh
