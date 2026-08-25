@@ -89,38 +89,39 @@ Same as the original project:
 1. Install Raspberry Pi OS, get the Pi on your Wi-Fi, and enable SSH
    (via `raspi-config`), same as usual.
 
-2. Install samba and the eject utility (used to signal the machine to
-   commit pending writes after each sync):
+2. On the Pi, clone this repo and run the installer:
 
-       sudo apt install samba eject
+       git clone https://github.com/galeswift/EmbroideryFileBridge.git
+       cd EmbroideryFileBridge
+       sudo ./install.sh
 
-3. Create the staging directory and the machine's mount point:
+   That's the whole setup — `install.sh` installs the required
+   packages (`samba`, `eject`), creates the staging directory, and
+   installs the sync script, systemd units, udev rule, and Samba
+   config for you. It's safe to re-run (e.g. after `git pull`ing an
+   update).
 
-       sudo mkdir -p /srv/embroidery/incoming /mnt/machine
-       sudo chown pi:pi /srv/embroidery/incoming
+   By default the staging directory and share are owned by whichever
+   account you ran `sudo` as. To use a different account:
 
-4. Install the sync script:
+       sudo TARGET_USER=someuser ./install.sh
 
-       sudo cp embroidery-sync.sh /usr/local/bin/embroidery-sync.sh
-       sudo chmod 755 /usr/local/bin/embroidery-sync.sh
+   <details>
+   <summary>What the installer does, if you'd rather do it by hand</summary>
 
-5. Install and enable the systemd units:
+   1. `apt install samba eject`
+   2. `mkdir -p /srv/embroidery/incoming /mnt/machine` and `chown` the
+      staging directory to your user
+   3. Copy `embroidery-sync.sh` to `/usr/local/bin/`, `chmod 755`
+   4. Copy `embroidery-sync.service` and `embroidery-sync.timer` to
+      `/etc/systemd/system/`, then
+      `systemctl daemon-reload && systemctl enable --now embroidery-sync.timer`
+   5. Copy `99-embroidery-bridge.rules` to `/etc/udev/rules.d/`, then
+      `udevadm control --reload-rules`
+   6. Copy `smb.conf` to `/etc/samba/smb.conf` (with `force user`/
+      `force group` set to your account) and `systemctl restart smbd`
 
-       sudo cp embroidery-sync.service /etc/systemd/system/
-       sudo cp embroidery-sync.timer /etc/systemd/system/
-       sudo systemctl daemon-reload
-       sudo systemctl enable --now embroidery-sync.timer
-
-6. Install the udev rule so a sync fires as soon as the machine is
-   plugged in / turned on:
-
-       sudo cp 99-embroidery-bridge.rules /etc/udev/rules.d/
-       sudo udevadm control --reload-rules
-
-7. Install the Samba config:
-
-       sudo cp smb.conf /etc/samba/smb.conf
-       sudo systemctl restart smbd
+   </details>
 
 ## Try it out
 
