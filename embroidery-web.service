@@ -1,0 +1,16 @@
+[Unit]
+Description=Embroidery File Bridge web UI
+After=network.target
+
+[Service]
+Type=simple
+User=__TARGET_USER__
+ExecStart=/usr/bin/python3 /usr/local/bin/embroidery-web.py
+Environment=EMBROIDERY_STAGING_DIR=/srv/embroidery/incoming
+Environment=EMBROIDERY_STATUS_DIR=/srv/embroidery/.sync-status
+Environment=EMBROIDERY_WEB_PORT=8080
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

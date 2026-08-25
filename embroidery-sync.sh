@@ -25,6 +25,7 @@
 set -euo pipefail
 
 STAGING_DIR=/srv/embroidery/incoming
+STATUS_DIR=/srv/embroidery/.sync-status
 MOUNT_POINT=/mnt/machine
 DEVICE=/dev/sda
 LOCK_FILE=/run/embroidery-sync.lock
@@ -35,7 +36,7 @@ flock -n 9 || exit 0
 # Nothing to do if the machine isn't plugged in / powered on.
 [ -b "$DEVICE" ] || exit 0
 
-mkdir -p "$STAGING_DIR" "$MOUNT_POINT"
+mkdir -p "$STAGING_DIR" "$STATUS_DIR" "$MOUNT_POINT"
 
 WE_MOUNTED=0
 if ! mount | grep -q " on $MOUNT_POINT "; then
@@ -58,6 +59,11 @@ for f in "$STAGING_DIR"/*; do
     if cp --preserve=timestamps "$f" "$tmp"; then
         mv -f "$tmp" "$dest"
         sync
+        # Record the size we successfully copied, so the web UI can show
+        # sync status without touching the (transiently mounted) machine
+        # itself. A later size mismatch here means either a new upload
+        # or the machine having dropped the file -- both get re-copied.
+        stat -c%s "$dest" > "$STATUS_DIR/$name"
         logger -t embroidery-sync "copied $name to machine"
     else
         rm -f "$tmp"
