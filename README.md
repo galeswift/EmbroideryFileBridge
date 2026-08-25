@@ -26,8 +26,18 @@ That's fragile in practice:
   that comes with it) may not happen until well after you think the
   copy is done. Turn the machine off in that window and whatever was
   still in the write-back cache is gone.
+* Many embroidery machines' USB mass-storage firmware holds newly
+  written files in a volatile scratch buffer while connected in "PC
+  link" mode, and only commits them to the machine's real, durable
+  storage on a proper safe-removal signal. A plain host-side
+  `mount`/`sync`/`umount` doesn't guarantee that happens. The file
+  looks completely normal — browsable, correct size — right up until
+  the *machine itself* is power-cycled, at which point it reloads its
+  last durably-committed state and the file is just gone. This is the
+  "files show up fine, then vanish after restarting the machine"
+  symptom.
 * There's no local record of what you sent, so there's no way to
-  recover after a loss like that.
+  recover after a loss like either of those.
 
 ## How this version works
 
@@ -43,14 +53,23 @@ That's fragile in practice:
    * A systemd timer (`embroidery-sync.timer`) re-runs the sync every
      60 seconds as a fallback, in case a udev event is ever missed or
      a file was staged while the machine was already connected.
-   * Each sync run mounts the machine, copies over any files that
-     aren't already there (by name), flushes, and unmounts again
-     immediately — keeping the "machine is mounted and vulnerable to
-     a power cut" window as short as possible, rather than leaving it
-     mounted indefinitely.
-3. Files already copied to the machine are left in the staging
-   directory as a local archive/history, and are skipped on future
-   syncs (they're matched by filename). Delete a file from
+   * Each sync run mounts the machine, copies over any files that are
+     missing or size-mismatched on the machine, flushes, and unmounts
+     again immediately — keeping the "machine is mounted and
+     vulnerable to a power cut" window as short as possible, rather
+     than leaving it mounted indefinitely. It also sends a SCSI
+     "safe to remove" request (`eject -s`) after unmounting, since
+     that's the signal some machine firmware actually uses to commit
+     pending writes, rather than a plain unmount.
+3. **The machine is never trusted as the source of truth.** A file is
+   only skipped on a sync run if it's already on the machine *and* the
+   same size as the staged copy. That matters specifically because of
+   the volatile-buffer issue above: if a machine power-cycle silently
+   drops a file (or leaves a truncated remnant), the very next time
+   that machine's USB device is seen again, the sync will notice the
+   mismatch and re-copy it — automatically, with no action needed from
+   you. Files already copied to the machine are left in the staging
+   directory as a local archive/history; delete a file from
    `/srv/embroidery/incoming` yourself once you no longer need the
    local copy.
 
@@ -70,9 +89,10 @@ Same as the original project:
 1. Install Raspberry Pi OS, get the Pi on your Wi-Fi, and enable SSH
    (via `raspi-config`), same as usual.
 
-2. Install samba and rsync tools:
+2. Install samba and the eject utility (used to signal the machine to
+   commit pending writes after each sync):
 
-       sudo apt install samba
+       sudo apt install samba eject
 
 3. Create the staging directory and the machine's mount point:
 

@@ -5,8 +5,16 @@
 # machine is currently connected and powered on. Mounts, copies,
 # flushes, and unmounts immediately, so the window in which the volume
 # is mounted (and therefore vulnerable to a mid-write power-off) is as
-# short as possible. Files already present on the machine (by name)
-# are left alone.
+# short as possible.
+#
+# Some embroidery machines only hold newly-written files in a volatile
+# scratch buffer while in USB-connect mode, and quietly drop them on
+# their own power cycle without ever corrupting the FAT table (so the
+# file looks fine right up until the machine is restarted). Because of
+# that, "the file is already on the machine" is not trusted purely by
+# name -- size is checked too, and anything missing or size-mismatched
+# gets re-copied. The staging directory (not the machine) is the
+# durable source of truth, so this is safe to re-run indefinitely.
 #
 # Designed to be run either:
 #   - on-demand via udev when the machine's USB device appears, or
@@ -43,12 +51,12 @@ for f in "$STAGING_DIR"/*; do
     [ -f "$f" ] || continue
     name=$(basename "$f")
     dest="$MOUNT_POINT/$name"
-    if [ -e "$dest" ]; then
+    if [ -e "$dest" ] && [ "$(stat -c%s "$f")" -eq "$(stat -c%s "$dest")" ]; then
         continue
     fi
     tmp="$dest.partial"
     if cp --preserve=timestamps "$f" "$tmp"; then
-        mv "$tmp" "$dest"
+        mv -f "$tmp" "$dest"
         sync
         logger -t embroidery-sync "copied $name to machine"
     else
@@ -60,4 +68,9 @@ done
 if [ "$WE_MOUNTED" -eq 1 ]; then
     sync
     umount "$MOUNT_POINT" || logger -t embroidery-sync "failed to unmount $MOUNT_POINT"
+    # Best-effort: some machine firmware only reliably commits pending
+    # writes to its real storage on a proper SCSI "stop unit" (safe to
+    # remove) request rather than on a plain unmount. Send one if the
+    # eject utility is available; harmless if it isn't.
+    command -v eject >/dev/null 2>&1 && eject -s "$DEVICE" 2>/dev/null || true
 fi
