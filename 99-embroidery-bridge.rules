@@ -1,0 +1,8 @@
+# Fire the sync service as soon as the embroidery machine's USB
+# mass-storage device shows up (i.e. it was just plugged in or
+# powered on). This is the fast path; embroidery-sync.timer is the
+# slow-poll fallback in case an event is ever missed.
+#
+# Matches the whole disk (e.g. /dev/sda), not partitions, matching how
+# the machine presents itself (no partition table).
+SUBSYSTEM=="block", KERNEL=="sd[a-z]", ACTION=="add", ENV{ID_BUS}=="usb", RUN+="/bin/systemctl --no-block start embroidery-sync.service"
