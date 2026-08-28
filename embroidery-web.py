@@ -15,8 +15,22 @@ from pathlib import Path
 from flask import Flask, flash, redirect, render_template_string, request, url_for
 from werkzeug.utils import secure_filename
 
-STAGING_DIR = Path(os.environ.get("EMBROIDERY_STAGING_DIR", "/srv/embroidery/incoming"))
-STATUS_DIR = Path(os.environ.get("EMBROIDERY_STATUS_DIR", "/srv/embroidery/.sync-status"))
+# /srv/embroidery/... is a Linux-only convention (the Pi). On Windows,
+# a leading "/" resolves against the current drive root instead of
+# being a real absolute path, so a Windows run would otherwise create
+# e.g. D:\srv\embroidery\incoming. Fall back to a folder next to this
+# script there instead -- only affects the default, and only on
+# Windows; the EMBROIDERY_* env vars always win, and Pi behavior is
+# unchanged.
+if os.name == "nt":
+    _DEFAULT_STAGING_DIR = Path(__file__).resolve().parent / "incoming"
+    _DEFAULT_STATUS_DIR = Path(__file__).resolve().parent / ".sync-status"
+else:
+    _DEFAULT_STAGING_DIR = Path("/srv/embroidery/incoming")
+    _DEFAULT_STATUS_DIR = Path("/srv/embroidery/.sync-status")
+
+STAGING_DIR = Path(os.environ.get("EMBROIDERY_STAGING_DIR", _DEFAULT_STAGING_DIR))
+STATUS_DIR = Path(os.environ.get("EMBROIDERY_STATUS_DIR", _DEFAULT_STATUS_DIR))
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("EMBROIDERY_SECRET_KEY") or os.urandom(24)

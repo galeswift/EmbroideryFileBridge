@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+
+# Local Windows test run of embroidery-web.py defaults to these,
+# next to the script, instead of /srv/embroidery/... (Linux-only).
+/incoming/
+/.sync-status/
