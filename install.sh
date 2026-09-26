@@ -41,9 +41,9 @@ STAGING_DIR=/srv/embroidery/incoming
 STATUS_DIR=/srv/embroidery/.sync-status
 MOUNT_POINT=/mnt/machine
 
-echo "==> Installing packages (eject, python3-flask)"
+echo "==> Installing packages (python3-flask)"
 apt-get update
-apt-get install -y eject python3-flask
+apt-get install -y python3-flask
 
 echo "==> Creating staging directory and machine mount point"
 mkdir -p "$STAGING_DIR" "$STATUS_DIR" "$MOUNT_POINT"
