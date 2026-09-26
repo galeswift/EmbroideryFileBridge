@@ -63,33 +63,36 @@ fixable from the Pi. A browser-based upload page sidesteps all of it.
    whenever it's actually present:
    * A udev rule (`99-embroidery-bridge.rules`) starts the sync the
      moment the machine's USB mass-storage device appears (i.e. it
-     was just plugged in or switched on).
-   * A systemd timer (`embroidery-sync.timer`) re-runs the sync every
-     60 seconds as a fallback, in case a udev event is ever missed or
-     a file was staged while the machine was already connected.
-   * Each sync run mounts the machine, copies over any files that are
-     missing or size-mismatched on the machine, flushes, and unmounts
-     again immediately — keeping the "machine is mounted and
-     vulnerable to a power cut" window as short as possible, rather
-     than leaving it mounted indefinitely. It also sends a SCSI
-     "safe to remove" request (`eject -s`) after unmounting, since
-     that's the signal some machine firmware actually uses to commit
-     pending writes, rather than a plain unmount.
-3. **The machine is never trusted as the source of truth.** A file is
-   only skipped on a sync run if it's already on the machine *and* the
-   same size as the staged copy. That matters specifically because of
-   the volatile-buffer issue above: if a machine power-cycle silently
-   drops a file (or leaves a truncated remnant), the very next time
-   that machine's USB device is seen again, the sync will notice the
-   mismatch and re-copy it — automatically, with no action needed from
-   you. The sync script records each successful copy's size in
-   `/srv/embroidery/.sync-status/`, which is how the web UI shows a
-   "synced to machine" / "pending" badge per file without needing to
-   touch the (transiently mounted) machine itself.
+     was just plugged in or switched on). This run checks *every*
+     staged file against the machine.
+   * A systemd timer (`embroidery-sync.timer`) runs the sync every 60
+     seconds to pick up new uploads while the machine is already
+     connected. It only mounts the machine when some staged file
+     hasn't been copied yet, so an idle machine isn't mounted over
+     and over.
+   * Each sync run mounts the machine, copies what's needed, flushes,
+     and unmounts again immediately — keeping the "machine is mounted
+     and vulnerable to a power cut" window as short as possible. If a
+     run fails partway (e.g. the machine's storage is full), it still
+     unmounts, and a mount left over from a crash or power loss is
+     cleared by the next run.
+3. **The machine is never trusted as the source of truth.** After each
+   copy, the sync records the staged file's size and modification time
+   in `/srv/embroidery/.sync-status/`. A file counts as synced only if
+   that record matches the staged file as it is now *and* the machine
+   has a same-size copy. So:
+   * If a machine power-cycle silently drops a file (or leaves a
+     truncated remnant), the check on reconnect notices and re-copies
+     it, with no action needed from you.
+   * Re-uploading a changed design under the same name always gets
+     re-copied, even if the new version happens to be the same size.
+   * The web UI shows a "synced to machine" / "pending" badge per file
+     from those records, without touching the machine itself.
 4. Files already copied to the machine are left in the staging
    directory as a local archive/history. Delete a file from the web
    UI (or `/srv/embroidery/incoming` directly) once you no longer need
-   the local copy.
+   the local copy. This only removes the Pi's copy; the file stays on
+   the machine until you delete it there.
 
 ## Required parts
 
@@ -114,7 +117,7 @@ Same as the original project:
        sudo ./install.sh
 
    That's the whole setup — `install.sh` installs the required
-   packages (`eject`, `python3-flask`), creates the staging directory,
+   package (`python3-flask`), creates the staging directory,
    and installs the sync script, web UI, systemd units, and udev rule
    for you. It's safe to re-run (e.g. after `git pull`ing an update).
 
@@ -126,7 +129,7 @@ Same as the original project:
    <details>
    <summary>What the installer does, if you'd rather do it by hand</summary>
 
-   1. `apt install eject python3-flask`
+   1. `apt install python3-flask`
    2. `mkdir -p /srv/embroidery/incoming /srv/embroidery/.sync-status /mnt/machine`
       and `chown` the staging/status directories to your user
    3. Copy `embroidery-sync.sh` to `/usr/local/bin/`, `chmod 755`
@@ -157,9 +160,15 @@ Same as the original project:
 * This should work with any machine that presents itself as USB mass
   storage without a partition table (Brother machines included, per
   the original project's notes).
-* The sync assumes the only external USB storage device attached to
-  the Pi is the embroidery machine. Plugging in anything else (e.g. a
-  thumb drive) may confuse the udev rule/mount logic.
+* The sync treats the first USB disk it finds (other than the Pi's own
+  boot disk) as the embroidery machine, so don't leave a thumb drive
+  plugged into the Pi. If you need to, pin the machine's device by
+  adding `Environment=EMBROIDERY_DEVICE=/dev/...` to
+  `embroidery-sync.service`.
+* The machine's storage ignores filename case, so uploading `rose.pes`
+  replaces a staged `Rose.pes`. Names are also cleaned up on upload
+  (spaces become `_`, and characters outside plain ASCII are dropped);
+  the page tells you when that happens.
 * Because the staging directory is the durable copy, it's safe to
   power the machine off at any time — the worst case is that a
   not-yet-synced file just waits for the next time the machine is on.
