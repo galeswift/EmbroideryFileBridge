@@ -442,3 +442,14 @@ def test_only_the_last_batch_of_an_upload_requests_a_drive_update(web):
     web.client.post("/api/upload", content_type="multipart/form-data", data={
         "path": "", "final": "1", "file": [(io.BytesIO(b"2"), "b.pes")], "relpath": ["b.pes"]})
     assert web.request.exists()
+
+
+def test_status_reports_the_hoop_size(web):
+    assert listing(web)["status"]["hoop_mm"] == [200, 200]
+
+
+def test_hoop_size_is_configurable(tmp_path, monkeypatch):
+    from conftest import load_web
+    monkeypatch.setenv("EMBROIDERY_HOOP_MM", "130x180")
+    other = load_web(tmp_path / "other", monkeypatch)
+    assert listing(other)["status"]["hoop_mm"] == [130, 180]

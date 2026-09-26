@@ -54,6 +54,10 @@ REQUEST_FILE = Path(os.environ.get("EMBROIDERY_REQUEST_FILE", _DEFAULT_ROOT / ".
 # The Pi's USB port in device mode; "configured" once the machine has
 # recognized the Pi as a USB drive.
 UDC_DIR = Path(os.environ.get("EMBROIDERY_UDC_DIR", "/sys/class/udc"))
+# The machine's largest embroidery area, "<width>x<height>" in mm. Designs
+# bigger than this don't show up on the machine, so the UI flags them.
+# The default is the Brother PR-S100's 8" x 8" hoop.
+HOOP_MM = [float(v) for v in os.environ.get("EMBROIDERY_HOOP_MM", "200x200").lower().split("x")]
 
 # Anything pyembroidery can read gets a preview; this is just what the
 # UI labels as a design rather than "other file".
@@ -198,6 +202,7 @@ def overall_status():
         "disk_free": usage.free,
         "disk_total": usage.total,
         "previews": pyembroidery is not None,
+        "hoop_mm": HOOP_MM,
     }
 
 

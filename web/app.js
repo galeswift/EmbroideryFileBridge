@@ -27,6 +27,7 @@ const ICONS = {
   hoop: '<rect x="10" y="2" width="4" height="3" rx=".8"/><circle cx="12" cy="13.5" r="8.5"/><path class="stitch" d="M7.5 14.5q2.25-3.2 4.5 0t4.5 0"/>',
   file: '<path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/>',
   home: '<path d="m4 11 8-7 8 7v9h-5v-6H9v6H4z"/>',
+  alert: '<path d="M12 4 2.5 20h19z"/><path d="M12 10v4M12 17h.01"/>',
 };
 function icon(name) {
   const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -298,6 +299,23 @@ function placeholder(e, big = false) {
   return h("div", { class: "ph" }, icon(kind), ext(e.name) || (big ? "FILE" : ""));
 }
 
+// The machine won't list a design bigger than its hoop (either way round),
+// so say so rather than let it silently not show up.
+function oversize(p) {
+  const hoop = state.status && state.status.hoop_mm;
+  if (!p || !hoop) return null;
+  const [w, h] = hoop;
+  const fits = (p.width_mm <= w && p.height_mm <= h) || (p.width_mm <= h && p.height_mm <= w);
+  if (fits) return null;
+  return `The file is too big for your machine: ${p.width_mm} × ${p.height_mm} mm, `
+    + `but the hoop is ${w} × ${h} mm. It won't show up on the machine.`;
+}
+
+function tooBigBadge(message) {
+  return h("span", { class: "too-big", title: message, role: "img", "aria-label": message },
+    icon("alert"), h("span", {}, "Too big"));
+}
+
 function fillThumb(thumb, e) {
   thumb.replaceChildren();
   thumb.classList.remove("loading");
@@ -306,8 +324,13 @@ function fillThumb(thumb, e) {
     thumb.append(placeholder(e));
   } else if (previews.has(key)) {
     const p = previews.get(key);
-    if (p) thumb.innerHTML = p.svg;  // server-built SVG: numbers + validated colors only
-    else thumb.append(placeholder(e));
+    if (p) {
+      thumb.innerHTML = p.svg;  // server-built SVG: numbers + validated colors only
+      const warning = oversize(p);
+      if (warning) thumb.append(tooBigBadge(warning));
+    } else {
+      thumb.append(placeholder(e));
+    }
   } else {
     thumb.classList.add("loading");
     thumb.dataset.pending = key;
@@ -805,6 +828,9 @@ function showViewer(i) {
     const inches = (mm) => (mm / 25.4).toFixed(2);
     facts.push(
       ["Design size", `${p.width_mm} × ${p.height_mm} mm (${inches(p.width_mm)} × ${inches(p.height_mm)} in)`],
+      ["Hoop", oversize(p)
+        ? h("span", { class: "warn-text" }, icon("alert"), oversize(p))
+        : `Fits the ${state.status.hoop_mm.join(" × ")} mm hoop`],
       ["Stitches", p.stitches.toLocaleString()],
       ["Colors", h("div", { class: "swatches" },
         p.colors.map((c) => h("span", { class: "swatch", style: `background:${c}`, title: c })))],

@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from conftest import load_web, mark_synced
+from conftest import load_web, make_pes, mark_synced
 
 sync_api = pytest.importorskip("playwright.sync_api")
 from werkzeug.serving import make_server  # noqa: E402
@@ -225,3 +225,33 @@ def test_failed_batch_is_reported_and_the_rest_still_upload(site, tmp_path):
     site.page.wait_for_selector(".toast.error >> text=didn't upload")
     assert "b.pes" in site.page.inner_text(".toast.error")
     assert card_names(site) == ["a.pes", "c.pes"]
+
+
+def test_oversized_design_gets_a_too_big_badge(site):
+    make_pes(site.staging / "Banner.pes", width_mm=550)
+    make_pes(site.staging / "Small.pes", width_mm=40)
+    open_page(site)
+    card(site, "Small.pes").locator(".thumb svg").wait_for()
+    badge = card(site, "Banner.pes").locator(".too-big")
+    badge.wait_for()
+    assert "Too big" in badge.inner_text()
+    tip = badge.get_attribute("title")
+    assert "too big for your machine" in tip and "200 × 200 mm" in tip
+    assert card(site, "Small.pes").locator(".too-big").count() == 0
+
+
+def test_viewer_warns_about_oversized_design(site):
+    make_pes(site.staging / "Banner.pes", width_mm=550)
+    open_page(site)
+    card(site, "Banner.pes").locator(".too-big").wait_for()
+    card(site, "Banner.pes").click()
+    site.page.wait_for_selector("#viewer[open] .warn-text")
+    assert "won't show up on the machine" in site.page.inner_text("#viewer-facts")
+
+
+def test_design_that_fits_says_so(site):
+    make_pes(site.staging / "Small.pes", width_mm=40)
+    open_page(site)
+    card(site, "Small.pes").click()
+    site.page.wait_for_selector("#viewer[open] .viewer-art svg")
+    assert "Fits the 200 × 200 mm hoop" in site.page.inner_text("#viewer-facts")

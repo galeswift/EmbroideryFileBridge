@@ -60,20 +60,25 @@ def mark_synced(web, rel):
     marker.write_text(f"{st.st_size} {int(st.st_mtime)}\n")
 
 
-@pytest.fixture
-def pes_bytes(tmp_path):
-    """A small two-color PES design, generated with pyembroidery."""
+def make_pes(path, width_mm=40):
+    """Write a small two-color PES design `width_mm` wide (and 20 mm tall)."""
     pyembroidery = pytest.importorskip("pyembroidery")
+    units = width_mm * 10  # pyembroidery works in 0.1 mm
     pattern = pyembroidery.EmbPattern()
     pattern.add_thread(pyembroidery.EmbThread("#d6336c"))
     pattern.add_thread(pyembroidery.EmbThread("#2b8a3e"))
-    for i in range(60):
+    for i in range(61):
         a = 2 * math.pi * i / 60
-        pattern.add_stitch_absolute(pyembroidery.STITCH, 200 * math.cos(a), 200 * math.sin(a))
+        pattern.add_stitch_absolute(pyembroidery.STITCH, units / 2 * math.cos(a), 100 * math.sin(a))
     pattern.add_command(pyembroidery.COLOR_CHANGE)
     for i in range(40):
-        pattern.add_stitch_absolute(pyembroidery.STITCH, -100 + i * 5, (i % 2) * 40)
+        pattern.add_stitch_absolute(pyembroidery.STITCH, -units / 4 + i * units / 80, (i % 2) * 40)
     pattern.add_command(pyembroidery.END)
-    out = tmp_path / "sample.pes"
-    pyembroidery.write_pes(pattern, str(out))
-    return out.read_bytes()
+    pyembroidery.write_pes(pattern, str(path))
+    return path.read_bytes()
+
+
+@pytest.fixture
+def pes_bytes(tmp_path):
+    """A small two-color PES design, generated with pyembroidery."""
+    return make_pes(tmp_path / "sample.pes")

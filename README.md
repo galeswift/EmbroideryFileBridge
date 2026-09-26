@@ -150,8 +150,11 @@ to run again and restarts everything for you:
 ## Notes
 
 * The PR-S100's maximum embroidery area is 8" × 8" (about 200 × 200 mm).
-  The machine doesn't list designs bigger than it can stitch, so an
-  oversized design can sit on the drive and simply not appear.
+  The machine doesn't list designs bigger than it can stitch, so the page
+  marks those with a red **Too big** badge (hover it, or open the design,
+  for its size). For a different machine, set its largest hoop in
+  `embroidery-web.service`, e.g.
+  `Environment=EMBROIDERY_HOOP_MM=130x180`, and re-run the installer.
 * Deleting on the page removes the design from the Pi **and** the drive.
 * The drive is FAT, which ignores filename case: uploading `rose.pes`
   replaces a staged `Rose.pes` (and `flowers/` merges into `Flowers/`).
