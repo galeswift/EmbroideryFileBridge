@@ -5,9 +5,11 @@ After=network.target
 [Service]
 Type=simple
 User=__TARGET_USER__
-ExecStart=/usr/bin/python3 /usr/local/bin/embroidery-web.py
+ExecStart=/opt/embroidery-bridge/venv/bin/python /opt/embroidery-bridge/embroidery-web.py
 Environment=EMBROIDERY_STAGING_DIR=/srv/embroidery/incoming
 Environment=EMBROIDERY_STATUS_DIR=/srv/embroidery/.sync-status
+Environment=EMBROIDERY_PREVIEW_DIR=/srv/embroidery/.previews
+Environment=EMBROIDERY_STATE_FILE=/srv/embroidery/.sync-state.json
 Environment=EMBROIDERY_WEB_PORT=8080
 Restart=on-failure
 RestartSec=2

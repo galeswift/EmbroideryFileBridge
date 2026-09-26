@@ -58,7 +58,23 @@ fixable from the Pi. A browser-based upload page sidesteps all of it.
    the Pi's SD card** (`/srv/embroidery/incoming`), not the machine
    itself. Open `http://<pi>:8080` from any device on the network,
    upload a file, and it's saved straight to the Pi — no client setup,
-   works whether or not the embroidery machine is currently on.
+   works whether or not the embroidery machine is currently on. The
+   page gives you:
+   * **Design previews**: each embroidery file (PES, DST, JEF, EXP,
+     VP3, …) is drawn as a thumbnail from its stitch data. Click one
+     for a larger view with its size, stitch count and thread colors.
+   * **Folders**: create folders, upload whole folders (button or drag
+     and drop), and move things between them. Folders are mirrored onto
+     the machine.
+   * **Multi-select**: checkboxes, shift-click for a range, Ctrl/⌘+A for
+     everything, then move, download or delete in one go. Drag items
+     onto a folder (or a folder in the path at the top) to move them.
+   * **Live status**: whether the machine is connected, how many files
+     are still waiting to be copied, when the last sync ran, and a
+     per-file "On machine" / "Waiting" badge.
+   * Search, sorting, grid or list view, rename, download, keyboard
+     shortcuts (`/` search, `Del` delete, `Esc` clear, arrows in the
+     preview), dark mode, and a phone-friendly layout.
 2. **A small sync service pushes staged files onto the machine**
    whenever it's actually present:
    * A udev rule (`99-embroidery-bridge.rules`) starts the sync the
@@ -117,9 +133,9 @@ Same as the original project:
        sudo ./install.sh
 
    That's the whole setup — `install.sh` installs the required
-   package (`python3-flask`), creates the staging directory,
-   and installs the sync script, web UI, systemd units, and udev rule
-   for you. It's safe to re-run (e.g. after `git pull`ing an update).
+   packages (`python3-flask`, `python3-venv`, and the `pyembroidery`
+   library for previews), creates the staging directory, and installs
+   the sync script, web UI, systemd units, and udev rule for you.
 
    By default the staging directory and web UI run as whichever
    account you ran `sudo` as. To use a different account:
@@ -129,11 +145,14 @@ Same as the original project:
    <details>
    <summary>What the installer does, if you'd rather do it by hand</summary>
 
-   1. `apt install python3-flask`
-   2. `mkdir -p /srv/embroidery/incoming /srv/embroidery/.sync-status /mnt/machine`
-      and `chown` the staging/status directories to your user
+   1. `apt install python3-flask python3-venv`
+   2. `mkdir -p /srv/embroidery/{incoming,.sync-status,.previews} /mnt/machine`
+      and `chown` those three `/srv/embroidery` directories to your user
    3. Copy `embroidery-sync.sh` to `/usr/local/bin/`, `chmod 755`
-   4. Copy `embroidery-web.py` to `/usr/local/bin/`, `chmod 755`
+   4. Copy `embroidery-web.py` and the `web/` folder to
+      `/opt/embroidery-bridge/`, then create a venv there with
+      `python3 -m venv --system-site-packages /opt/embroidery-bridge/venv`
+      and `/opt/embroidery-bridge/venv/bin/pip install pyembroidery==1.5.1`
    5. Copy `embroidery-sync.service`, `embroidery-sync.timer`, and
       `embroidery-web.service` (with `User=` set to your account) to
       `/etc/systemd/system/`, then
@@ -142,6 +161,15 @@ Same as the original project:
       `udevadm control --reload-rules`
 
    </details>
+
+## Updating
+
+On the Pi, pull the latest version and re-run the installer. It's safe
+to run again and restarts the web UI for you:
+
+    cd EmbroideryFileBridge
+    git pull
+    sudo ./install.sh
 
 ## Try it out
 
@@ -166,9 +194,14 @@ Same as the original project:
   adding `Environment=EMBROIDERY_DEVICE=/dev/...` to
   `embroidery-sync.service`.
 * The machine's storage ignores filename case, so uploading `rose.pes`
-  replaces a staged `Rose.pes`. Names are also cleaned up on upload
-  (spaces become `_`, and characters outside plain ASCII are dropped);
-  the page tells you when that happens.
+  replaces a staged `Rose.pes` (and `flowers/` merges into `Flowers/`).
+  Names are also cleaned up on upload: characters the machine's
+  storage can't hold (`: * ? " < > | \`) become `_`, and accented or
+  non-Latin letters are reduced to plain ASCII. The page tells you when
+  that happens.
+* Moving, renaming or deleting on the page only changes the Pi's copy.
+  A moved or renamed file is copied to its new place on the machine,
+  but the old copy stays there until you delete it on the machine.
 * Because the staging directory is the durable copy, it's safe to
   power the machine off at any time — the worst case is that a
   not-yet-synced file just waits for the next time the machine is on.
@@ -182,3 +215,24 @@ Same as the original project:
   internet-facing service). If you ever need more concurrency, swap
   `embroidery-web.service`'s `ExecStart` for a production WSGI server
   (e.g. `gunicorn`).
+
+## Development
+
+The test suite covers the web API, the sync script (run for real
+against temporary folders, with `mount` and friends stubbed out), and
+the page itself in a headless browser.
+
+    pip install -r requirements-dev.txt
+    python -m pytest
+
+The browser tests need Playwright and a Chromium browser; they're
+skipped automatically when those aren't installed:
+
+    pip install playwright
+    python -m playwright install chromium   # or use an installed Google Chrome
+
+To try the web UI on a PC without a Pi, just run it. On Windows its
+data goes in folders next to the script; elsewhere set
+`EMBROIDERY_STAGING_DIR` and friends to somewhere writable:
+
+    python embroidery-web.py      # then open http://localhost:8080

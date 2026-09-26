@@ -5,6 +5,8 @@ __pycache__/
 # next to the script, instead of /srv/embroidery/... (Linux-only).
 /incoming/
 /.sync-status/
+/.previews/
+/.sync-state.json
 
 # Personal Claude Code permission overrides (not shared with collaborators)
 .claude/settings.local.json

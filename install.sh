@@ -39,21 +39,39 @@ TARGET_GROUP="$(id -gn "$TARGET_USER")"
 
 STAGING_DIR=/srv/embroidery/incoming
 STATUS_DIR=/srv/embroidery/.sync-status
+PREVIEW_DIR=/srv/embroidery/.previews
 MOUNT_POINT=/mnt/machine
+APP_DIR=/opt/embroidery-bridge
+PYEMBROIDERY_VERSION=1.5.1
 
-echo "==> Installing packages (python3-flask)"
+echo "==> Installing packages (python3-flask, python3-venv)"
 apt-get update
-apt-get install -y python3-flask
+apt-get install -y python3-flask python3-venv
 
 echo "==> Creating staging directory and machine mount point"
-mkdir -p "$STAGING_DIR" "$STATUS_DIR" "$MOUNT_POINT"
-chown "$TARGET_USER:$TARGET_GROUP" "$STAGING_DIR" "$STATUS_DIR"
+mkdir -p "$STAGING_DIR" "$STATUS_DIR" "$PREVIEW_DIR" "$MOUNT_POINT"
+chown "$TARGET_USER:$TARGET_GROUP" "$STAGING_DIR" "$PREVIEW_DIR"
+chown -R "$TARGET_USER:$TARGET_GROUP" "$STATUS_DIR"
 
 echo "==> Installing sync script"
 install -m 755 "$SCRIPT_DIR/embroidery-sync.sh" /usr/local/bin/embroidery-sync.sh
 
 echo "==> Installing web UI"
-install -m 755 "$SCRIPT_DIR/embroidery-web.py" /usr/local/bin/embroidery-web.py
+install -d -m 755 "$APP_DIR" "$APP_DIR/web"
+install -m 755 "$SCRIPT_DIR/embroidery-web.py" "$APP_DIR/embroidery-web.py"
+install -m 644 "$SCRIPT_DIR"/web/* "$APP_DIR/web/"
+# Earlier versions ran the web UI from here; the service no longer does.
+rm -f /usr/local/bin/embroidery-web.py
+
+# Design previews use pyembroidery, which isn't packaged for apt. Give it
+# a venv that still sees apt's Flask. Previews are optional: without
+# network access this step fails and the UI shows file-type icons instead.
+if [ ! -x "$APP_DIR/venv/bin/python" ]; then
+    python3 -m venv --system-site-packages "$APP_DIR/venv"
+fi
+if ! "$APP_DIR/venv/bin/pip" install --disable-pip-version-check -q "pyembroidery==$PYEMBROIDERY_VERSION"; then
+    echo "    (couldn't install pyembroidery; design previews will be unavailable)"
+fi
 
 echo "==> Installing systemd units"
 install -m 644 "$SCRIPT_DIR/embroidery-sync.service" /etc/systemd/system/embroidery-sync.service
@@ -61,6 +79,8 @@ install -m 644 "$SCRIPT_DIR/embroidery-sync.timer" /etc/systemd/system/embroider
 sed "s/__TARGET_USER__/$TARGET_USER/" "$SCRIPT_DIR/embroidery-web.service" > /etc/systemd/system/embroidery-web.service
 systemctl daemon-reload
 systemctl enable --now embroidery-sync.timer embroidery-web.service
+# Pick up a new version when re-running the installer after an update.
+systemctl restart embroidery-web.service
 
 echo "==> Installing udev rule"
 install -m 644 "$SCRIPT_DIR/99-embroidery-bridge.rules" /etc/udev/rules.d/99-embroidery-bridge.rules

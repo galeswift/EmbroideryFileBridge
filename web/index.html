@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Embroidery Bridge</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='%23b4235a' stroke-width='2.4' stroke-linecap='round'%3E%3Crect x='13' y='2.5' width='6' height='4' rx='1'/%3E%3Ccircle cx='16' cy='18' r='11.5'/%3E%3Cpath d='M9.5 19q3.25-4.5 6.5 0t6.5 0' stroke-dasharray='2.6 2.4'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="13" y="2.5" width="6" height="4" rx="1"/><circle cx="16" cy="18" r="11.5"/><path class="stitch" d="M9.5 19q3.25-4.5 6.5 0t6.5 0"/></svg>
+    <span>Embroidery Bridge</span>
+  </div>
+  <div class="status" id="status" aria-live="polite"></div>
+</header>
+
+<main>
+  <div class="toolbar">
+    <nav class="crumbs" id="crumbs" aria-label="Folder path"></nav>
+    <div class="tools">
+      <label class="search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input type="search" id="search" placeholder="Search" aria-label="Search this folder">
+      </label>
+      <select id="sort" aria-label="Sort by">
+        <option value="name">Name</option>
+        <option value="newest">Newest</option>
+        <option value="size">Size</option>
+      </select>
+      <div class="seg" role="group" aria-label="View">
+        <button id="view-grid" class="icon-btn" aria-label="Grid view" title="Grid view"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg></button>
+        <button id="view-list" class="icon-btn" aria-label="List view" title="List view"><svg viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg></button>
+      </div>
+      <button id="new-folder" class="btn">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
+        <span>New folder</span>
+      </button>
+      <div class="split">
+        <button id="upload" class="btn primary">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+          <span>Upload</span>
+        </button>
+        <button id="upload-folder" class="btn primary" title="Upload a whole folder" aria-label="Upload a folder">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 16v-5M9.5 13.5 12 11l2.5 2.5"/></svg>
+        </button>
+      </div>
+      <input type="file" id="file-input" multiple hidden>
+      <input type="file" id="folder-input" webkitdirectory multiple hidden>
+    </div>
+  </div>
+
+  <section id="items" class="items grid" aria-label="Files"></section>
+
+  <div id="empty" class="empty" hidden>
+    <svg viewBox="0 0 64 64" aria-hidden="true"><rect x="26" y="5" width="12" height="8" rx="2"/><circle cx="32" cy="36" r="23"/><circle cx="32" cy="36" r="17" class="thin"/><path class="stitch" d="M19 38q6.5-9 13 0t13 0"/></svg>
+    <h2 id="empty-title">Nothing here yet</h2>
+    <p id="empty-text">Drop designs anywhere on this page, or</p>
+    <button class="btn primary" id="empty-upload">Choose files</button>
+  </div>
+</main>
+
+<div class="selection-bar" id="selection-bar" hidden>
+  <span id="selection-count"></span>
+  <div class="selection-actions">
+    <button class="btn ghost" id="sel-all">Select all</button>
+    <button class="btn ghost" id="sel-rename">Rename</button>
+    <button class="btn ghost" id="sel-download">Download</button>
+    <button class="btn ghost" id="sel-move">Move</button>
+    <button class="btn danger" id="sel-delete">Delete</button>
+    <button class="icon-btn" id="sel-clear" aria-label="Clear selection" title="Clear selection (Esc)"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+</div>
+
+<div class="drop-overlay" id="drop-overlay" hidden>
+  <div class="drop-card">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+    <p>Drop to upload to <strong id="drop-target"></strong></p>
+  </div>
+</div>
+
+<div class="uploads" id="uploads" hidden>
+  <div class="uploads-head"><span id="uploads-label"></span><span id="uploads-pct"></span></div>
+  <div class="bar"><div id="uploads-bar"></div></div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<dialog id="viewer" class="viewer">
+  <div class="viewer-body">
+    <div class="viewer-art" id="viewer-art"></div>
+    <aside class="viewer-info">
+      <div class="viewer-head">
+        <h2 id="viewer-name"></h2>
+        <button class="icon-btn" data-close aria-label="Close" title="Close (Esc)"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
+      <dl id="viewer-facts" class="facts"></dl>
+      <div class="viewer-actions">
+        <a class="btn" id="viewer-download" download>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12M7 11l5 5 5-5M4 20h16"/></svg><span>Download</span>
+        </a>
+        <button class="btn" id="viewer-rename"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg><span>Rename</span></button>
+        <button class="btn danger" id="viewer-delete"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg><span>Delete</span></button>
+      </div>
+      <div class="viewer-nav">
+        <button class="icon-btn" id="viewer-prev" aria-label="Previous" title="Previous (←)"><svg viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg></button>
+        <span id="viewer-pos"></span>
+        <button class="icon-btn" id="viewer-next" aria-label="Next" title="Next (→)"><svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+      </div>
+    </aside>
+  </div>
+</dialog>
+
+<dialog id="ask" class="small">
+  <form method="dialog" id="ask-form">
+    <h2 id="ask-title"></h2>
+    <p id="ask-text"></p>
+    <input id="ask-input" autocomplete="off" spellcheck="false">
+    <div id="ask-list" class="folder-list" role="listbox"></div>
+    <!-- OK comes first so Enter in the text box confirms; CSS shows it last. -->
+    <div class="dialog-actions">
+      <button class="btn primary" id="ask-ok" value="ok">OK</button>
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -14,10 +14,11 @@
 # that, the staging directory (not the machine) is the durable source
 # of truth, and this is safe to re-run indefinitely.
 #
-# After each successful copy, the size and mtime of the staged file
-# that was copied are recorded in $STATUS_DIR/<name>. A file counts as
-# synced only if that marker matches the staged file as it is now AND
-# the machine has a same-size copy -- so a re-uploaded file always gets
+# Folders in the staging directory are mirrored onto the machine. After
+# each successful copy, the size and mtime of the staged file that was
+# copied are recorded in $STATUS_DIR/<path>. A file counts as synced
+# only if that marker matches the staged file as it is now AND the
+# machine has a same-size copy -- so a re-uploaded file always gets
 # re-copied, even when the new version happens to be the same size.
 #
 # Two ways this gets run:
@@ -32,11 +33,13 @@
 
 set -euo pipefail
 
-STAGING_DIR=/srv/embroidery/incoming
-STATUS_DIR=/srv/embroidery/.sync-status
-MOUNT_POINT=/mnt/machine
-LOCK_FILE=/run/embroidery-sync.lock
-FULL_CHECK_FLAG=/run/embroidery-sync.full-check
+# Overridable so the test suite can run against temporary directories.
+STAGING_DIR=${EMBROIDERY_STAGING_DIR:-/srv/embroidery/incoming}
+STATUS_DIR=${EMBROIDERY_STATUS_DIR:-/srv/embroidery/.sync-status}
+STATE_FILE=${EMBROIDERY_STATE_FILE:-/srv/embroidery/.sync-state.json}
+MOUNT_POINT=${EMBROIDERY_MOUNT_POINT:-/mnt/machine}
+LOCK_FILE=${EMBROIDERY_LOCK_FILE:-/run/embroidery-sync.lock}
+FULL_CHECK_FLAG=${EMBROIDERY_FULL_CHECK_FLAG:-/run/embroidery-sync.full-check}
 
 exec 9>"$LOCK_FILE"
 flock -n 9 || exit 0
@@ -64,20 +67,29 @@ find_device() {
 DEVICE=${EMBROIDERY_DEVICE:-$(find_device)}
 
 # Nothing to do if the machine isn't plugged in / powered on.
-[ -n "$DEVICE" ] && [ -b "$DEVICE" ] || exit 0
+[ -n "$DEVICE" ] && [ -e "$DEVICE" ] || exit 0
 
 stamp() { stat -c '%s %Y' "$1"; }
 marker_matches() { [ -f "$STATUS_DIR/$1" ] && [ "$(< "$STATUS_DIR/$1")" = "$2" ]; }
 
+# Markers mirror the staging folder layout. The web UI (not root) deletes
+# them when files are moved or removed, so keep them owned like STATUS_DIR.
+write_marker() {
+    local marker="$STATUS_DIR/$1"
+    mkdir -p "$(dirname "$marker")"
+    echo "$2" > "$marker"
+    chown -R --reference="$STATUS_DIR" "$STATUS_DIR" 2>/dev/null || true
+}
+
 full_check=0
 [ -e "$FULL_CHECK_FLAG" ] && full_check=1
 
-# Uploads in progress are dotfiles, which this glob skips.
-shopt -s nullglob
+# Staged files as paths relative to STAGING_DIR, including subfolders.
+# Anything hidden (in-progress uploads are dotfiles) is skipped.
 files=()
-for f in "$STAGING_DIR"/*; do
-    [ -f "$f" ] && files+=("$f")
-done
+while IFS= read -r -d '' rel; do
+    files+=("${rel#./}")
+done < <(cd "$STAGING_DIR" && find . -type f ! -path '*/.*' -print0 | sort -z)
 
 if [ "${#files[@]}" -eq 0 ]; then
     rm -f "$FULL_CHECK_FLAG"
@@ -86,8 +98,8 @@ fi
 
 if [ "$full_check" -eq 0 ]; then
     pending=0
-    for f in "${files[@]}"; do
-        if ! marker_matches "$(basename "$f")" "$(stamp "$f")"; then
+    for rel in "${files[@]}"; do
+        if ! marker_matches "$rel" "$(stamp "$STAGING_DIR/$rel")"; then
             pending=1
             break
         fi
@@ -116,39 +128,46 @@ if ! mount -o umask=0,flush,noatime "$DEVICE" "$MOUNT_POINT"; then
 fi
 
 failed=0
+copied=0
 declare -A seen=()
-for f in "${files[@]}"; do
-    name=$(basename "$f")
+for rel in "${files[@]}"; do
+    f="$STAGING_DIR/$rel"
 
-    # FAT is case-insensitive: Rose.pes and rose.pes are the same file
-    # on the machine, and copying both would overwrite each other on
-    # every run.
-    key=${name,,}
+    # FAT is case-insensitive: Rose.pes and rose.pes (or Flowers/ and
+    # flowers/) are the same path on the machine, and copying both would
+    # overwrite each other on every run.
+    key=${rel,,}
     if [ -n "${seen[$key]:-}" ]; then
-        log "skipping $name: same name on the machine as ${seen[$key]} (only the case differs)"
+        log "skipping $rel: same path on the machine as ${seen[$key]} (only the case differs)"
         continue
     fi
-    seen[$key]=$name
+    seen[$key]=$rel
 
-    dest="$MOUNT_POINT/$name"
+    dest="$MOUNT_POINT/$rel"
     current=$(stamp "$f")
     if [ -f "$dest" ] && [ "$(stat -c%s "$dest")" = "${current%% *}" ] \
-        && marker_matches "$name" "$current"; then
+        && marker_matches "$rel" "$current"; then
         continue
     fi
 
     tmp="$dest.partial"
-    if cp --preserve=timestamps "$f" "$tmp" && mv -f "$tmp" "$dest" && sync; then
+    if mkdir -p "$(dirname "$dest")" && cp --preserve=timestamps "$f" "$tmp" \
+        && mv -f "$tmp" "$dest" && sync; then
         tmp=
-        echo "$current" > "$STATUS_DIR/$name"
-        log "copied $name to machine"
+        write_marker "$rel" "$current"
+        copied=$((copied + 1))
+        log "copied $rel to machine"
     else
         rm -f "$tmp" || true
         tmp=
         failed=1
-        log "failed to copy $name to machine (is its storage full?)"
+        log "failed to copy $rel to machine (is its storage full?)"
     fi
 done
+
+# For the web UI's "Synced N min ago".
+printf '{"time": %s, "copied": %s, "failed": %s}\n' "$(date +%s)" "$copied" "$failed" \
+    > "$STATE_FILE.tmp" && mv -f "$STATE_FILE.tmp" "$STATE_FILE" || true
 
 # Keep the flag after a failure, so the next timer run re-checks
 # everything instead of trusting markers.

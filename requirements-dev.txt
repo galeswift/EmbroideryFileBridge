@@ -1,0 +1,4 @@
+# For running the test suite: python -m pytest
+flask>=2.2
+pyembroidery==1.5.1
+pytest>=7
