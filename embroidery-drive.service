@@ -1,0 +1,9 @@
+[Unit]
+Description=Keep the embroidery machine's USB drive in step with the library
+# Started at boot and every minute by embroidery-drive.timer, and right
+# after changes by embroidery-drive.path.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/embroidery-bridge/embroidery-drive.py
+SyslogIdentifier=embroidery-drive

@@ -4,7 +4,7 @@ LAN web UI for the embroidery file bridge staging directory.
 
 Serves a single-page app (web/) plus a small JSON API for browsing,
 uploading, organizing into folders, and deleting the files that
-embroidery-sync.sh copies onto the machine. Embroidery designs get a
+embroidery-drive.py puts on the machine's USB drive. Embroidery designs get a
 rendered stitch preview via pyembroidery when it's installed.
 
 Intentionally has no authentication, matching the guest-only trust
@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import time
 import unicodedata
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
@@ -47,6 +48,12 @@ STAGING_DIR = Path(os.environ.get("EMBROIDERY_STAGING_DIR", _DEFAULT_STAGING_DIR
 STATUS_DIR = Path(os.environ.get("EMBROIDERY_STATUS_DIR", _DEFAULT_ROOT / ".sync-status"))
 PREVIEW_DIR = Path(os.environ.get("EMBROIDERY_PREVIEW_DIR", _DEFAULT_ROOT / ".previews"))
 STATE_FILE = Path(os.environ.get("EMBROIDERY_STATE_FILE", _DEFAULT_ROOT / ".sync-state.json"))
+# Touched after every change; embroidery-drive.path watches it and updates
+# the machine's USB drive.
+REQUEST_FILE = Path(os.environ.get("EMBROIDERY_REQUEST_FILE", _DEFAULT_ROOT / ".requests" / "update-drive"))
+# The Pi's USB port in device mode; "configured" once the machine has
+# recognized the Pi as a USB drive.
+UDC_DIR = Path(os.environ.get("EMBROIDERY_UDC_DIR", "/sys/class/udc"))
 
 # Anything pyembroidery can read gets a preview; this is just what the
 # UI labels as a design rather than "other file".
@@ -131,7 +138,7 @@ def walk_files(folder):
 # ------------------------------------------------------------ sync state
 
 def stamp(st):
-    # Must match what embroidery-sync.sh writes: "<size> <mtime>".
+    # Must match what embroidery-drive.py writes: "<size> <mtime>".
     return f"{st.st_size} {int(st.st_mtime)}"
 
 
@@ -160,11 +167,20 @@ def forget(rel):
 
 
 def machine_connected():
-    """Whether a USB disk (the machine) is attached, or None if unknown."""
-    sys_block = Path("/sys/block")
-    if not sys_block.is_dir():
+    """Whether the machine is using the Pi as its USB drive, or None if unknown."""
+    try:
+        states = [(d / "state").read_text().strip() for d in UDC_DIR.iterdir()]
+    except OSError:
         return None
-    return any("/usb" in os.path.realpath(dev) for dev in sys_block.glob("sd*"))
+    return "configured" in states if states else None
+
+
+def request_drive_update():
+    try:
+        REQUEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        REQUEST_FILE.write_text(f"{time.time()}\n")
+    except OSError:
+        pass  # the once-a-minute check will pick the change up anyway
 
 
 def overall_status():
@@ -357,6 +373,8 @@ def api_upload():
         if raw_parts[-1] != dest.name:
             renamed.append([raw_parts[-1], dest.name])
 
+    if saved:
+        request_drive_update()
     return jsonify(saved=saved, renamed=renamed, skipped=skipped)
 
 
@@ -371,6 +389,7 @@ def api_mkdir():
     if target.exists():
         abort(409, f"“{target.name}” already exists here.")
     target.mkdir()
+    request_drive_update()
     return jsonify(path=rel_of(target))
 
 
@@ -390,6 +409,7 @@ def api_rename():
     dest = src.parent / name
     src.rename(dest)
     forget(old_rel)
+    request_drive_update()
     return jsonify(path=rel_of(dest))
 
 
@@ -415,6 +435,8 @@ def api_move():
         shutil.move(str(src), str(target))
         forget(rel)
         moved.append(rel_of(target))
+    if moved:
+        request_drive_update()
     return jsonify(moved=moved, failed=failed)
 
 
@@ -432,6 +454,8 @@ def api_delete():
             p.unlink()
         forget(rel_of(p))
         deleted.append(rel)
+    if deleted:
+        request_drive_update()
     return jsonify(deleted=deleted)
 
 

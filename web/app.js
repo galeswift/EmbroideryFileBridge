@@ -160,6 +160,17 @@ async function load({ quiet = false } = {}) {
     for (const p of state.selected) if (!present.has(p)) state.selected.delete(p);
   }
   render();
+  refreshViewer();
+}
+
+// Keep an open preview in step with the latest listing (e.g. its status).
+function refreshViewer() {
+  if (!$("#viewer").open || !viewer.entry) return;
+  const path = viewer.entry.path;
+  viewer.files = visibleEntries().filter((e) => e.type === "file");
+  const i = viewer.files.findIndex((e) => e.path === path);
+  if (i < 0) $("#viewer").close();
+  else showViewer(i);
 }
 
 // ---------------------------------------------------------- rendering
@@ -180,10 +191,10 @@ function renderStatus() {
     : s.machine === false ? ["", "Machine not connected"] : ["", "Machine status unknown"];
   box.append(h("span", { class: `pill ${machine[0]}` }, h("span", { class: "dot" }), machine[1]));
   if (s.pending) {
-    box.append(h("span", { class: "pill wait", title: "These copy over automatically when the machine is connected." },
-      icon("clock"), `${s.pending} waiting to copy`));
+    box.append(h("span", { class: "pill wait", title: "Being added to the machine's USB drive; this takes a few seconds." },
+      icon("clock"), `Updating USB drive (${s.pending})`));
   } else if (s.last_sync) {
-    box.append(h("span", { class: "pill", title: fmtDate(s.last_sync) }, icon("check"), `Synced ${timeAgo(s.last_sync)}`));
+    box.append(h("span", { class: "pill", title: fmtDate(s.last_sync) }, icon("check"), `Drive updated ${timeAgo(s.last_sync)}`));
   }
   box.append(h("span", { class: "pill disk", title: `${fmtSize(s.disk_total - s.disk_free)} used of ${fmtSize(s.disk_total)}` },
     `${fmtSize(s.disk_free)} free`));
@@ -246,8 +257,8 @@ function card(e) {
     sub = h("div", { class: "sub" },
       h("span", { class: "size" }, fmtSize(e.size)),
       e.synced
-        ? h("span", { class: "chip ok", title: "Copied to the machine" }, icon("check"), "On machine")
-        : h("span", { class: "chip wait", title: "Copies over automatically when the machine is connected" }, icon("clock"), "Waiting"));
+        ? h("span", { class: "chip ok", title: "On the machine's USB drive" }, icon("check"), "On machine")
+        : h("span", { class: "chip wait", title: "Being added to the machine's USB drive" }, icon("clock"), "Updating"));
   }
   const el = h("article", {
     class: `card ${e.type}${selected ? " selected" : ""}`,
@@ -497,7 +508,7 @@ async function remove(entries) {
   const ok = await ask({
     title: `Delete ${what}?`,
     text: (folders.length ? "Folders are deleted with everything in them. " : "")
-      + "This removes them from the Pi; copies already on the machine stay there.",
+      + "They'll also disappear from the machine's USB drive.",
     ok: "Delete", danger: true,
   });
   if (!ok) return false;
@@ -715,7 +726,7 @@ function showViewer(i) {
   const facts = [
     ["Status", e.synced
       ? h("span", { class: "chip ok" }, icon("check"), "On machine")
-      : h("span", { class: "chip wait" }, icon("clock"), "Waiting for machine")],
+      : h("span", { class: "chip wait" }, icon("clock"), "Updating USB drive…")],
     ["File size", fmtSize(e.size)],
     ["Uploaded", fmtDate(e.mtime)],
   ];
@@ -793,7 +804,8 @@ window.addEventListener("hashchange", () => load());
 
 // Keep sync status fresh while the page is visible.
 setInterval(() => {
-  if (document.visibilityState === "visible" && !state.uploading && !document.querySelector("dialog[open]")) {
+  // Not while a rename/move/delete dialog is up; an open preview is fine.
+  if (document.visibilityState === "visible" && !state.uploading && !$("#ask").open) {
     load({ quiet: true });
   }
 }, 4000);

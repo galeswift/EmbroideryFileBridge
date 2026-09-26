@@ -385,3 +385,50 @@ def test_same_origin_post_is_allowed(web):
 
 def test_listing_a_missing_folder_is_404(web):
     assert web.client.get("/api/files", query_string={"path": "nope"}).status_code == 404
+
+
+# ------------------------------------------------ machine & drive updates
+
+def set_udc(web, state):
+    (web.udc / "20980000.usb").mkdir(parents=True, exist_ok=True)
+    (web.udc / "20980000.usb" / "state").write_text(state + "\n")
+
+
+def test_machine_status_unknown_without_usb_device_mode(web):
+    assert listing(web)["status"]["machine"] is None
+
+
+def test_machine_connected_when_usb_configured(web):
+    set_udc(web, "configured")
+    assert listing(web)["status"]["machine"] is True
+
+
+def test_machine_not_connected(web):
+    set_udc(web, "not attached")
+    assert listing(web)["status"]["machine"] is False
+
+
+@pytest.mark.parametrize("action", ["upload", "mkdir", "rename", "move", "delete"])
+def test_changes_request_a_drive_update(web, action):
+    upload(web.client, [("a.pes", b"1")])
+    (web.staging / "Box").mkdir()
+    web.request.unlink(missing_ok=True)
+    if action == "upload":
+        upload(web.client, [("b.pes", b"2")])
+    elif action == "mkdir":
+        web.client.post("/api/mkdir", json={"path": "", "name": "New"})
+    elif action == "rename":
+        web.client.post("/api/rename", json={"path": "a.pes", "name": "c.pes"})
+    elif action == "move":
+        web.client.post("/api/move", json={"paths": ["a.pes"], "dest": "Box"})
+    elif action == "delete":
+        web.client.post("/api/delete", json={"paths": ["a.pes"]})
+    assert web.request.exists()
+
+
+def test_failed_actions_do_not_request_a_drive_update(web):
+    upload(web.client, [("a.pes", b"1")])
+    web.request.unlink()
+    web.client.post("/api/delete", json={"paths": []})
+    web.client.post("/api/move", json={"paths": ["a.pes"], "dest": ""})  # already there
+    assert not web.request.exists()

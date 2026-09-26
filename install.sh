@@ -1,16 +1,16 @@
 #!/bin/bash
 #
 # One-shot installer for the embroidery file bridge. Run this on the
-# Raspberry Pi itself, from within a clone of this repository:
+# Raspberry Pi Zero itself, from within a clone of this repository:
 #
 #   sudo ./install.sh
 #
-# Installs packages, creates the staging directory, and installs the
-# sync script, web UI, systemd units, and udev rule. Idempotent --
-# safe to re-run (e.g. after pulling updates).
+# Installs packages, sets the Pi's USB port up to act as a USB flash
+# drive, and installs the drive manager, web UI and their systemd units.
+# Idempotent -- safe to re-run (e.g. after pulling updates).
 #
-# By default the staging directory and web UI run as whichever user
-# invoked sudo. To use a different account:
+# By default the library and web UI belong to whichever user invoked
+# sudo. To use a different account:
 #
 #   sudo TARGET_USER=someuser ./install.sh
 
@@ -37,31 +37,39 @@ if ! id "$TARGET_USER" >/dev/null 2>&1; then
 fi
 TARGET_GROUP="$(id -gn "$TARGET_USER")"
 
-STAGING_DIR=/srv/embroidery/incoming
-STATUS_DIR=/srv/embroidery/.sync-status
-PREVIEW_DIR=/srv/embroidery/.previews
-MOUNT_POINT=/mnt/machine
+ROOT=/srv/embroidery
+STAGING_DIR=$ROOT/incoming
+STATUS_DIR=$ROOT/.sync-status
+PREVIEW_DIR=$ROOT/.previews
+REQUEST_DIR=$ROOT/.requests
 APP_DIR=/opt/embroidery-bridge
+CONFIG=/boot/firmware/config.txt
 PYEMBROIDERY_VERSION=1.5.1
 
-echo "==> Installing packages (python3-flask, python3-venv)"
+echo "==> Installing packages"
 apt-get update
-apt-get install -y python3-flask python3-venv
+apt-get install -y python3-flask python3-venv mtools dosfstools fdisk
 
-echo "==> Creating staging directory and machine mount point"
-mkdir -p "$STAGING_DIR" "$STATUS_DIR" "$PREVIEW_DIR" "$MOUNT_POINT"
-chown "$TARGET_USER:$TARGET_GROUP" "$STAGING_DIR" "$PREVIEW_DIR"
+echo "==> Creating the library folders"
+mkdir -p "$STAGING_DIR" "$STATUS_DIR" "$PREVIEW_DIR" "$REQUEST_DIR"
+chown "$TARGET_USER:$TARGET_GROUP" "$STAGING_DIR" "$PREVIEW_DIR" "$REQUEST_DIR"
 chown -R "$TARGET_USER:$TARGET_GROUP" "$STATUS_DIR"
 
-echo "==> Installing sync script"
-install -m 755 "$SCRIPT_DIR/embroidery-sync.sh" /usr/local/bin/embroidery-sync.sh
+echo "==> Removing the old PC-link sync, if present"
+# Earlier versions wrote to the machine's "PC link" RAM disk through its
+# USB-B port. The Pi now acts as a USB flash drive instead.
+systemctl disable --now embroidery-sync.timer embroidery-sync.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/embroidery-sync.service /etc/systemd/system/embroidery-sync.timer \
+      /etc/udev/rules.d/99-embroidery-bridge.rules \
+      /usr/local/bin/embroidery-sync.sh /usr/local/bin/embroidery-web.py
+udevadm control --reload-rules || true
+rmdir /mnt/machine 2>/dev/null || true
 
-echo "==> Installing web UI"
+echo "==> Installing the drive manager and web UI"
 install -d -m 755 "$APP_DIR" "$APP_DIR/web"
+install -m 755 "$SCRIPT_DIR/embroidery-drive.py" "$APP_DIR/embroidery-drive.py"
 install -m 755 "$SCRIPT_DIR/embroidery-web.py" "$APP_DIR/embroidery-web.py"
 install -m 644 "$SCRIPT_DIR"/web/* "$APP_DIR/web/"
-# Earlier versions ran the web UI from here; the service no longer does.
-rm -f /usr/local/bin/embroidery-web.py
 
 # Design previews use pyembroidery, which isn't packaged for apt. Give it
 # a venv that still sees apt's Flask. Previews are optional: without
@@ -73,18 +81,28 @@ if ! "$APP_DIR/venv/bin/pip" install --disable-pip-version-check -q "pyembroider
     echo "    (couldn't install pyembroidery; design previews will be unavailable)"
 fi
 
+echo "==> Setting the USB port up to act as a flash drive"
+REBOOT_NEEDED=0
+if ! grep -qx 'dtoverlay=dwc2' "$CONFIG"; then
+    cp "$CONFIG" "$CONFIG.before-embroidery-bridge"
+    printf '\n[all]\n# Embroidery bridge: USB port acts as a flash drive for the machine\ndtoverlay=dwc2\n' >> "$CONFIG"
+    REBOOT_NEEDED=1
+fi
+if ! [ -d /sys/class/udc ] || [ -z "$(ls /sys/class/udc 2>/dev/null)" ]; then
+    REBOOT_NEEDED=1
+fi
+
 echo "==> Installing systemd units"
-install -m 644 "$SCRIPT_DIR/embroidery-sync.service" /etc/systemd/system/embroidery-sync.service
-install -m 644 "$SCRIPT_DIR/embroidery-sync.timer" /etc/systemd/system/embroidery-sync.timer
+for unit in embroidery-drive.service embroidery-drive.timer embroidery-drive.path; do
+    install -m 644 "$SCRIPT_DIR/$unit" "/etc/systemd/system/$unit"
+done
 sed "s/__TARGET_USER__/$TARGET_USER/" "$SCRIPT_DIR/embroidery-web.service" > /etc/systemd/system/embroidery-web.service
 systemctl daemon-reload
-systemctl enable --now embroidery-sync.timer embroidery-web.service
+systemctl enable --now embroidery-drive.timer embroidery-drive.path embroidery-web.service
 # Pick up a new version when re-running the installer after an update.
 systemctl restart embroidery-web.service
-
-echo "==> Installing udev rule"
-install -m 644 "$SCRIPT_DIR/99-embroidery-bridge.rules" /etc/udev/rules.d/99-embroidery-bridge.rules
-udevadm control --reload-rules
+echo "    Building the USB drive from the library..."
+systemctl start embroidery-drive.service || echo "    (drive update failed; see: journalctl -t embroidery-drive)"
 
 PI_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 
@@ -92,13 +110,19 @@ cat <<EOF
 
 ==> Done.
 
-Staging directory: $STAGING_DIR (owned by $TARGET_USER)
-Web UI:             http://$(hostname).local:8080${PI_IP:+  (or http://$PI_IP:8080)}
+Library:  $STAGING_DIR (owned by $TARGET_USER)
+Web UI:   http://$(hostname).local:8080${PI_IP:+  (or http://$PI_IP:8080)}
 
-Next steps:
-  1. From your PC/Mac/phone, open the web UI above and upload a
-     design file.
-  2. Plug the USB cable into the embroidery machine and power it on.
-     Files sync automatically within a few seconds.
-  3. Watch sync activity with:  journalctl -t embroidery-sync -f
+Connect the Pi's "USB" port (not PWR) to the machine's USB-A (flash
+drive) port with a micro-USB to USB-A data cable, and keep the Pi's own
+power adapter in PWR. On the machine, use the USB flash drive button.
+
+Watch drive updates with:  journalctl -t embroidery-drive -f
 EOF
+
+if [ "$REBOOT_NEEDED" -eq 1 ]; then
+    cat <<EOF
+
+*** Reboot needed to switch the USB port into flash-drive mode: sudo reboot
+EOF
+fi

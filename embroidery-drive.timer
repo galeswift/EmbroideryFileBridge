@@ -1,0 +1,10 @@
+[Unit]
+Description=Plug in the embroidery USB drive at boot and check it every minute
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

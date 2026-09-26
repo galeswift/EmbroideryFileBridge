@@ -1,0 +1,10 @@
+[Unit]
+Description=Update the embroidery USB drive when the web UI changes the library
+
+[Path]
+# The web UI touches this after every upload, move, rename or delete.
+PathChanged=/srv/embroidery/.requests/update-drive
+Unit=embroidery-drive.service
+
+[Install]
+WantedBy=paths.target

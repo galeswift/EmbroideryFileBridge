@@ -1,9 +1,6 @@
 import importlib.util
 import io
 import math
-import os
-import shutil
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +23,10 @@ def load_web(tmp_path, monkeypatch):
     monkeypatch.setenv("EMBROIDERY_STATUS_DIR", str(ns.status))
     monkeypatch.setenv("EMBROIDERY_PREVIEW_DIR", str(ns.previews))
     monkeypatch.setenv("EMBROIDERY_STATE_FILE", str(ns.state))
+    ns.request = base / ".requests" / "update-drive"
+    ns.udc = base / "udc"
+    monkeypatch.setenv("EMBROIDERY_REQUEST_FILE", str(ns.request))
+    monkeypatch.setenv("EMBROIDERY_UDC_DIR", str(ns.udc))
 
     spec = importlib.util.spec_from_file_location("embroidery_web", ROOT / "embroidery-web.py")
     mod = importlib.util.module_from_spec(spec)
@@ -76,33 +77,3 @@ def pes_bytes(tmp_path):
     out = tmp_path / "sample.pes"
     pyembroidery.write_pes(pattern, str(out))
     return out.read_bytes()
-
-
-# ---------------------------------------------------------------- bash
-
-def find_bash():
-    if os.name == "nt":
-        # C:\Windows\System32\bash.exe is WSL, not what we want.
-        for candidate in (shutil.which("bash"), r"C:\Program Files\Git\usr\bin\bash.exe",
-                          r"C:\Program Files\Git\bin\bash.exe"):
-            if candidate and "system32" not in candidate.lower() and Path(candidate).exists():
-                return candidate
-        return None
-    return shutil.which("bash")
-
-
-@pytest.fixture(scope="session")
-def bash():
-    path = find_bash()
-    if not path:
-        pytest.skip("bash not available")
-    return path
-
-
-def case_insensitive_fs(path):
-    probe = path / "CaseProbe"
-    probe.write_text("x")
-    try:
-        return (path / "caseprobe").exists()
-    finally:
-        probe.unlink()

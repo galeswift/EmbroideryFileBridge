@@ -7,6 +7,7 @@ __pycache__/
 /.sync-status/
 /.previews/
 /.sync-state.json
+/.requests/
 
 # Personal Claude Code permission overrides (not shared with collaborators)
 .claude/settings.local.json
