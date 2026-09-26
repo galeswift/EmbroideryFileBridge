@@ -171,6 +171,22 @@ def test_folder_pending_counts_nested_files(web):
     assert listing(web)["status"]["pending"] == 1
 
 
+def test_folder_samples_prefer_its_own_designs_then_nested(web):
+    upload(web.client, [("A/Deep/a.pes", b"1"), ("A/zebra.pes", b"2"), ("A/notes.txt", b"3"),
+                        ("A/Apple.dst", b"4"), ("A/Deep/b.jef", b"5"), ("A/Deep/c.pes", b"6")])
+    samples = entry(listing(web), "A")["samples"]
+    assert [s["path"] for s in samples] == ["A/Apple.dst", "A/zebra.pes", "A/Deep/a.pes", "A/Deep/b.jef"]
+    st = (web.staging / "A" / "Apple.dst").stat()
+    assert samples[0]["size"] == st.st_size and samples[0]["mtime"] == int(st.st_mtime)
+
+
+def test_folder_without_designs_has_no_samples(web):
+    upload(web.client, [("Docs/readme.txt", b"x")])
+    (web.staging / "Empty").mkdir()
+    data = listing(web)
+    assert entry(data, "Docs")["samples"] == [] and entry(data, "Empty")["samples"] == []
+
+
 def test_hidden_and_in_progress_files_are_not_listed(web):
     (web.staging / ".rose.pes.uploading").write_bytes(b"partial")
     (web.staging / "real.pes").write_bytes(b"x")

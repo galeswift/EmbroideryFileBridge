@@ -113,6 +113,31 @@ def test_navigate_into_folder_and_back(site):
     card(site, "Holiday").wait_for()
 
 
+def test_folder_card_shows_its_designs(site):
+    for name in ("a.pes", "b.pes", "c.pes"):
+        make_pes(site.staging / "Holiday" / name)
+    (site.staging / "Notes").mkdir()
+    (site.staging / "Notes" / "readme.txt").write_bytes(b"x")
+    open_page(site)
+    holiday = card(site, "Holiday")
+    holiday.locator(".collage .tile svg").nth(2).wait_for()
+    assert holiday.locator(".collage .tile").count() == 3
+    assert holiday.locator(".folder-badge").is_visible()
+    assert not holiday.locator(".thumb > .ph").is_visible()
+    # A folder without designs keeps the plain folder icon.
+    assert card(site, "Notes").locator(".collage").count() == 0
+    assert card(site, "Notes").locator(".thumb > .ph").is_visible()
+
+
+def test_folder_collage_is_hidden_in_list_view(site):
+    make_pes(site.staging / "Holiday" / "a.pes")
+    open_page(site)
+    site.page.click("#view-list")
+    holiday = card(site, "Holiday")
+    assert not holiday.locator(".collage").is_visible()
+    assert holiday.locator(".thumb > .ph").is_visible()
+
+
 def test_rename_from_viewer(site):
     (site.staging / "rose.pes").write_bytes(b"x")
     open_page(site)

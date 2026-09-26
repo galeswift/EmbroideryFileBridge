@@ -255,6 +255,21 @@ def render_preview(path):
     }
 
 
+FOLDER_SAMPLES = 4
+
+
+def folder_samples(folder, files):
+    """A few designs to show on a folder's card: its own first, then nested ones."""
+    designs = [f for f in files if f.suffix.lower() in DESIGN_EXTENSIONS]
+    designs.sort(key=lambda f: (len(f.relative_to(folder).parts), str(f.relative_to(folder)).lower()))
+    samples = []
+    for f in designs[:FOLDER_SAMPLES]:
+        st = f.stat()
+        samples.append({"name": f.name, "path": rel_of(f), "size": st.st_size,
+                        "mtime": int(st.st_mtime), "design": True})
+    return samples
+
+
 # --------------------------------------------------------------- routes
 
 @app.before_request
@@ -307,6 +322,7 @@ def api_files():
                 "mtime": int(st.st_mtime),
                 "count": len(files),
                 "pending": sum(1 for f in files if not is_synced(f, f.stat())),
+                "samples": folder_samples(p, files),
             })
         elif p.is_file():
             entries.append({

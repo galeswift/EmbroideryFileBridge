@@ -249,8 +249,8 @@ function card(e) {
   const thumb = h("div", { class: "thumb" });
   let sub;
   if (e.type === "folder") {
-    thumb.append(h("div", { class: "ph" }, icon("folder")));
-    sub = h("div", { class: "sub" },
+    folderThumb(thumb, e);
+    sub =h("div", { class: "sub" },
       h("span", {}, plural(e.count, "file")),
       e.pending ? h("span", { class: "chip wait" }, icon("clock"), `${e.pending} waiting`) : null);
   } else {
@@ -334,6 +334,38 @@ function fillThumb(thumb, e) {
   } else {
     thumb.classList.add("loading");
     thumb.dataset.pending = key;
+    pendingEntries.set(key, e);
+  }
+}
+
+// A folder shows a few of its designs; list view (and a folder without
+// designs) keeps the plain folder icon.
+function folderThumb(thumb, e) {
+  thumb.append(h("div", { class: "ph" }, icon("folder")));
+  const samples = (state.status && state.status.previews && e.samples) || [];
+  if (!samples.length) return;
+  thumb.classList.add("has-collage");
+  const tiles = samples.map((s) => {
+    const tile = h("div", { class: "tile" });
+    fillTile(tile, s);
+    return tile;
+  });
+  thumb.append(h("div", { class: `collage n${samples.length}` }, ...tiles),
+    h("span", { class: "folder-badge", "aria-hidden": "true" }, icon("folder")));
+}
+
+function fillTile(tile, e) {
+  tile.replaceChildren();
+  tile.classList.remove("loading");
+  const key = previewKey(e);
+  if (previews.has(key)) {
+    const p = previews.get(key);
+    if (p) tile.innerHTML = p.svg;  // server-built SVG, as in fillThumb
+    else tile.append(h("div", { class: "ph" }, icon("hoop")));
+  } else {
+    tile.classList.add("loading");
+    tile.dataset.pending = key;
+    pendingEntries.set(key, e);
   }
 }
 
@@ -342,18 +374,20 @@ function fillThumb(thumb, e) {
 const previewQueue = [];
 let previewsInFlight = 0;
 const MAX_PREVIEW_FETCHES = 2;  // the Pi Zero renders these one core at a time
+// Preview key -> the file waiting for it (a card's own file, or a folder's sample).
+const pendingEntries = new Map();
 
 const previewObserver = new IntersectionObserver((items) => {
   for (const it of items) {
     if (!it.isIntersecting) continue;
     previewObserver.unobserve(it.target);
-    const entry = state.entries.find((e) => e.path === it.target.closest(".card")?.dataset.path);
+    const entry = pendingEntries.get(it.target.dataset.pending);
     if (entry) queuePreview(entry);
   }
 }, { rootMargin: "200px" });
 
 function observePreviews() {
-  document.querySelectorAll(".thumb[data-pending]").forEach((t) => previewObserver.observe(t));
+  document.querySelectorAll("[data-pending]").forEach((t) => previewObserver.observe(t));
 }
 
 function queuePreview(entry) {
@@ -382,10 +416,12 @@ async function getPreview(entry) {
 
 function refreshThumbs(entry) {
   const key = previewKey(entry);
-  document.querySelectorAll(`.thumb[data-pending]`).forEach((t) => {
+  pendingEntries.delete(key);
+  document.querySelectorAll("[data-pending]").forEach((t) => {
     if (t.dataset.pending !== key) return;
     delete t.dataset.pending;
-    fillThumb(t, entry);
+    if (t.classList.contains("tile")) fillTile(t, entry);
+    else fillThumb(t, entry);
   });
   if (viewer.entry && previewKey(viewer.entry) === key) showViewer(viewer.index);
 }

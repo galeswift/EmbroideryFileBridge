@@ -42,7 +42,8 @@ none of those limits.
      JEF, EXP, VP3, …), with a detail view showing size, stitch count and
      thread colors.
    * **Folders**: create them, upload whole folders (button or drag and
-     drop), move things between them.
+     drop), move things between them. Each folder's card previews a few
+     of the designs inside it.
    * **Multi-select**: checkboxes, shift-click ranges, Ctrl/⌘+A, then
      move, download or delete in one go; or drag items onto a folder.
    * **Live status**: whether the machine is connected, and an

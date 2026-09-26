@@ -74,6 +74,7 @@ def make_pes(path, width_mm=40):
     for i in range(40):
         pattern.add_stitch_absolute(pyembroidery.STITCH, -units / 4 + i * units / 80, (i % 2) * 40)
     pattern.add_command(pyembroidery.END)
+    path.parent.mkdir(parents=True, exist_ok=True)
     pyembroidery.write_pes(pattern, str(path))
     return path.read_bytes()
 
