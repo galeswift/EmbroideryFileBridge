@@ -64,9 +64,10 @@ DESIGN_EXTENSIONS = {
 }
 
 app = Flask(__name__, static_folder=None)
-# Designs are a few MB at most; the cap is sized for uploading a whole
-# folder at once while still keeping one bad upload from filling the card.
-app.config["MAX_CONTENT_LENGTH"] = 256 * 1024 * 1024
+# Per request. The page uploads big folders in ~20 MB batches, so this
+# only limits a single huge file. Uploads are buffered in TMPDIR, which
+# the service points at the SD card (a Pi Zero's /tmp is ~200 MB of RAM).
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
 
 
 # ---------------------------------------------------------------- paths
@@ -268,7 +269,7 @@ def reject_cross_site_posts():
 @app.errorhandler(413)
 def json_error(err):
     if err.code == 413:
-        message = "That upload is too large (256 MB max at once)."
+        message = "That file is too large (1 GB max per file)."
     else:
         message = err.description if isinstance(err.description, str) else err.name
     return jsonify(error=message), err.code
@@ -373,7 +374,9 @@ def api_upload():
         if raw_parts[-1] != dest.name:
             renamed.append([raw_parts[-1], dest.name])
 
-    if saved:
+    # A batched upload sends final=0 on all but its last request, so the
+    # drive is rebuilt once at the end rather than after every batch.
+    if saved and request.form.get("final", "1") != "0":
         request_drive_update()
     return jsonify(saved=saved, renamed=renamed, skipped=skipped)
 

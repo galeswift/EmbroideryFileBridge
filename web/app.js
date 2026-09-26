@@ -587,48 +587,119 @@ function uploadable(items) {
   });
 }
 
-function upload(items) {
+// Big uploads go in batches: each request stays small enough for a Pi
+// Zero (and under the server's limit on form fields), and one failed
+// batch doesn't lose the rest. Tests can shrink the batch size.
+const BATCH_BYTES = 20 * 1024 * 1024;
+const BATCH_FILES = 100;
+
+function batches(items) {
+  const limit = window.UPLOAD_BATCH_BYTES || BATCH_BYTES;
+  const out = [];
+  let current = [];
+  let size = 0;
+  for (const item of items) {
+    if (current.length && (size + item.file.size > limit || current.length >= BATCH_FILES)) {
+      out.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(item);
+    size += item.file.size;
+  }
+  if (current.length) out.push(current);
+  return out;
+}
+
+function sendBatch(base, batch, final, onProgress) {
+  return new Promise((resolve) => {
+    const fd = new FormData();
+    fd.append("path", base);
+    // Only the last batch asks the Pi to update the machine's USB drive.
+    fd.append("final", final ? "1" : "0");
+    for (const { file, rel } of batch) {
+      fd.append("file", file, file.name);
+      fd.append("relpath", rel);
+    }
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/upload");
+    xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) onProgress(ev.loaded / ev.total); };
+    xhr.onload = () => {
+      let res = null;
+      try { res = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      if (xhr.status < 400 && res) resolve({ ok: true, res });
+      else resolve({ ok: false, error: (res && res.error) || `the Pi answered ${xhr.status}` });
+    };
+    xhr.onerror = () => resolve({ ok: false, error: "lost connection to the Pi" });
+    xhr.send(fd);
+  });
+}
+
+async function upload(items) {
   items = uploadable(items);
   if (!items.length) return;
   if (state.uploading) return toast("Wait for the current upload to finish.", "error");
   state.uploading = true;
 
-  const fd = new FormData();
-  fd.append("path", state.path);
-  for (const { file, rel } of items) {
-    fd.append("file", file, file.name);
-    fd.append("relpath", rel);
-  }
-  const total = items.reduce((n, { file }) => n + file.size, 0);
+  const base = state.path;  // files land in the folder that was open when the upload started
+  const sizeOf = (list) => list.reduce((n, { file }) => n + file.size, 0);
+  const total = sizeOf(items) || 1;
+  const groups = batches(items);
   const panel = $("#uploads");
-  $("#uploads-label").textContent = `Uploading ${plural(items.length, "file")}`;
-  $("#uploads-pct").textContent = "0%";
-  $("#uploads-bar").style.width = "0";
-  panel.hidden = false;
-
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/upload");
-  xhr.upload.onprogress = (ev) => {
-    const pct = Math.round(((ev.lengthComputable ? ev.loaded / ev.total : 0) || 0) * 100);
+  const progress = (done) => {
+    const pct = Math.min(100, Math.round((done / total) * 100));
     $("#uploads-pct").textContent = `${pct}%`;
     $("#uploads-bar").style.width = `${pct}%`;
-    if (pct >= 100) $("#uploads-label").textContent = "Saving…";
   };
-  const done = () => { state.uploading = false; panel.hidden = true; load(); };
-  xhr.onload = () => {
-    let res = {};
-    try { res = JSON.parse(xhr.responseText); } catch { /* ignore */ }
-    if (xhr.status >= 400) {
-      toast(res.error || `Upload failed (${xhr.status})`, "error");
-    } else {
-      toast(`Uploaded ${plural(res.saved.length, "file")} (${fmtSize(total)})`);
-      res.renamed.forEach(([from, to]) => toast(`“${from}” was saved as “${to}” (the machine only supports plain characters)`));
-      if (res.skipped.length) toast(`Skipped ${plural(res.skipped.length, "file")} with unusable names`, "error");
+  progress(0);
+  panel.hidden = false;
+
+  let sent = 0;
+  let saved = 0;
+  let failedBytes = 0;
+  const renamed = [];
+  const skipped = [];
+  const failed = [];
+  const errors = new Set();
+  for (const [i, batch] of groups.entries()) {
+    const size = sizeOf(batch);
+    $("#uploads-label").textContent = groups.length > 1
+      ? `Uploading ${plural(items.length, "file")} (part ${i + 1} of ${groups.length})`
+      : `Uploading ${plural(items.length, "file")}`;
+    let result;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      result = await sendBatch(base, batch, i === groups.length - 1, (f) => progress(sent + f * size));
+      if (result.ok) break;
     }
-    done();
-  };
-  xhr.onerror = () => { toast("Upload failed: lost connection to the Pi.", "error"); done(); };
-  xhr.send(fd);
+    sent += size;
+    progress(sent);
+    if (result.ok) {
+      saved += result.res.saved.length;
+      renamed.push(...result.res.renamed);
+      skipped.push(...result.res.skipped);
+      load({ quiet: true });  // show files as each batch lands
+    } else {
+      failed.push(...batch.map(({ rel }) => rel));
+      failedBytes += size;
+      errors.add(result.error);
+    }
+  }
+
+  state.uploading = false;
+  panel.hidden = true;
+  load();
+
+  if (saved) toast(`Uploaded ${plural(saved, "file")} (${fmtSize(sizeOf(items) - failedBytes)})`);
+  if (renamed.length > 3) {
+    toast(`${plural(renamed.length, "file")} were renamed to plain characters the machine supports`);
+  } else {
+    renamed.forEach(([from, to]) => toast(`“${from}” was saved as “${to}” (the machine only supports plain characters)`));
+  }
+  if (skipped.length) toast(`Skipped ${plural(skipped.length, "file")} with unusable names`, "error");
+  if (failed.length) {
+    const which = failed.length <= 3 ? `: ${failed.map((r) => `“${r}”`).join(", ")}` : "";
+    toast(`${plural(failed.length, "file")} didn't upload (${[...errors].join("; ")})${which}. Try those again.`, "error");
+  }
 }
 
 // Folders dropped from the desktop arrive as directory entries; walk them

@@ -42,6 +42,7 @@ STAGING_DIR=$ROOT/incoming
 STATUS_DIR=$ROOT/.sync-status
 PREVIEW_DIR=$ROOT/.previews
 REQUEST_DIR=$ROOT/.requests
+UPLOAD_TMP=$ROOT/.upload-tmp
 APP_DIR=/opt/embroidery-bridge
 CONFIG=/boot/firmware/config.txt
 PYEMBROIDERY_VERSION=1.5.1
@@ -51,8 +52,8 @@ apt-get update
 apt-get install -y python3-flask python3-venv mtools dosfstools fdisk
 
 echo "==> Creating the library folders"
-mkdir -p "$STAGING_DIR" "$STATUS_DIR" "$PREVIEW_DIR" "$REQUEST_DIR"
-chown "$TARGET_USER:$TARGET_GROUP" "$STAGING_DIR" "$PREVIEW_DIR" "$REQUEST_DIR"
+mkdir -p "$STAGING_DIR" "$STATUS_DIR" "$PREVIEW_DIR" "$REQUEST_DIR" "$UPLOAD_TMP"
+chown "$TARGET_USER:$TARGET_GROUP" "$STAGING_DIR" "$PREVIEW_DIR" "$REQUEST_DIR" "$UPLOAD_TMP"
 chown -R "$TARGET_USER:$TARGET_GROUP" "$STATUS_DIR"
 
 echo "==> Removing the old PC-link sync, if present"

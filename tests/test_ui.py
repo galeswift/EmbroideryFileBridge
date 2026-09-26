@@ -186,3 +186,42 @@ def test_list_view_is_remembered(site):
     site.page.click("#view-list")
     site.page.reload()
     site.page.wait_for_selector("#items.list")
+
+
+def test_big_upload_is_sent_in_batches(site, tmp_path):
+    site.page.add_init_script("window.UPLOAD_BATCH_BYTES = 10")
+    files = []
+    for name in ("a.pes", "b.pes", "c.pes"):
+        f = tmp_path / name
+        f.write_bytes(b"0123456789")  # one batch each
+        files.append(str(f))
+    requests = []
+    site.page.on("request", lambda r: r.url.endswith("/api/upload") and requests.append(r))
+    open_page(site)
+    site.page.set_input_files("#file-input", files)
+    site.page.wait_for_selector(".toast >> text=Uploaded 3 files")
+    assert len(requests) == 3
+    assert card_names(site) == ["a.pes", "b.pes", "c.pes"]
+    assert site.request.exists()  # the last batch asked for a drive update
+
+
+def test_failed_batch_is_reported_and_the_rest_still_upload(site, tmp_path):
+    site.page.add_init_script("window.UPLOAD_BATCH_BYTES = 10")
+    files = []
+    for name in ("a.pes", "b.pes", "c.pes"):
+        f = tmp_path / name
+        f.write_bytes(b"0123456789")
+        files.append(str(f))
+
+    def fail_b(route):
+        if b'filename="b.pes"' in (route.request.post_data_buffer or b""):
+            route.abort()
+        else:
+            route.continue_()
+
+    site.page.route("**/api/upload", fail_b)
+    open_page(site)
+    site.page.set_input_files("#file-input", files)
+    site.page.wait_for_selector(".toast.error >> text=didn't upload")
+    assert "b.pes" in site.page.inner_text(".toast.error")
+    assert card_names(site) == ["a.pes", "c.pes"]

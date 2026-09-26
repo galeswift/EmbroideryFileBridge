@@ -11,6 +11,8 @@ Environment=EMBROIDERY_STATUS_DIR=/srv/embroidery/.sync-status
 Environment=EMBROIDERY_PREVIEW_DIR=/srv/embroidery/.previews
 Environment=EMBROIDERY_STATE_FILE=/srv/embroidery/.sync-state.json
 Environment=EMBROIDERY_WEB_PORT=8080
+# Buffer uploads on the SD card: /tmp on a Pi Zero is ~200 MB of RAM.
+Environment=TMPDIR=/srv/embroidery/.upload-tmp
 Restart=on-failure
 RestartSec=2
 

@@ -1,4 +1,5 @@
 """Tests for the web UI's JSON API (embroidery-web.py)."""
+import io
 import json
 import os
 import time
@@ -432,3 +433,12 @@ def test_failed_actions_do_not_request_a_drive_update(web):
     web.client.post("/api/delete", json={"paths": []})
     web.client.post("/api/move", json={"paths": ["a.pes"], "dest": ""})  # already there
     assert not web.request.exists()
+
+
+def test_only_the_last_batch_of_an_upload_requests_a_drive_update(web):
+    res = web.client.post("/api/upload", content_type="multipart/form-data", data={
+        "path": "", "final": "0", "file": [(io.BytesIO(b"1"), "a.pes")], "relpath": ["a.pes"]})
+    assert res.status_code == 200 and not web.request.exists()
+    web.client.post("/api/upload", content_type="multipart/form-data", data={
+        "path": "", "final": "1", "file": [(io.BytesIO(b"2"), "b.pes")], "relpath": ["b.pes"]})
+    assert web.request.exists()
