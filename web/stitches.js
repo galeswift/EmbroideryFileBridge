@@ -1,25 +1,32 @@
 // Stitch-level design preview for the viewer.
 //
 // The server sends every stitch (see encode_stitches in embroidery-web.py).
-// With WebGL2 each stitch is drawn as a strand of thread and lit like one:
+// With WebGL2 every stitch becomes a real 3D strand of thread:
 //
-//   1. height pass   every stitch adds a rounded ridge to a height map, so
-//                    layered stitches and satin columns stand up;
-//   2. thread pass   the last stitch sewn over each pixel records its color,
-//                    direction and where across the strand the pixel is;
-//   3. light pass    per pixel: a hair-style (Kajiya-Kay / Marschner-like)
-//                    anisotropic sheen along the thread, ply twist when
-//                    zoomed in, occlusion and cast shadows from the height
-//                    map, and woven fabric where there is no thread.
+//   stacking  (once per design) the stitches are laid down in sewing order
+//             on a height grid: each rests, taut, on the highest thing
+//             beneath its middle and is pulled down into the fabric at its
+//             two needle holes, so underlay, layers and satin pile up the
+//             way the machine builds them;
+//   geometry  each stitch is a flattened cylinder bent along that path,
+//             pinched where it enters the needle holes (one small mesh,
+//             drawn once per stitch by the GPU, in sewing order: where
+//             stitches overlap, the later one is on top);
+//   lighting  shadows and soft occlusion from the stacked heights, and a
+//             hair-style (Kajiya-Kay / Marschner-like) sheen along the
+//             thread with fine twisting filaments up close.
 //
 // Without WebGL2 it falls back to thread-width lines on a 2D canvas.
 "use strict";
 
 (() => {
-  const THREAD_RADIUS = 0.21;   // mm: embroidery thread lies about 0.4 mm wide
-  const THREAD_HEIGHT = 0.2;    // mm a single stitch stands off the fabric
+  const RX = 0.25;              // mm: half the width thread spreads to
+  const RZ = 0.11;              // mm: half its thickness, flattened by tension
+  const RAMP = 0.45;            // mm over which it climbs out of a needle hole
+  const HOLE_DIP = RZ * 1.4;    // mm a stitch sinks at its needle holes, at most
+  const MAX_STACK = 0.55;       // mm: how high layers of stitching can pile up
+  const NEIGHBORS = 3;          // stitches just before this one lie beside it, not under it
   const TWIST_PERIOD = 0.5;     // mm per turn of the thread's twist
-  const HEIGHT_RANGE = 1.0;     // mm of stacked height an 8-bit height map can hold
   const MAX_PX_PER_MM = 90;     // how far in you can zoom
   const FIT_MARGIN = 1.12;
 
@@ -52,7 +59,7 @@
       segmentCount += count > 1 ? count - 1 : 1;  // a lone stitch is drawn as a dot
     }
 
-    // Per segment: x0, y0, x1, y1, seed; and its color as RGBA bytes.
+    // Per segment, in sewing order: x0, y0, x1, y1, seed; and its color as RGBA bytes.
     const segments = new Float32Array(segmentCount * 5);
     const segmentColors = new Uint8Array(segmentCount * 4);
     let seed = 12345;
@@ -75,216 +82,269 @@
     };
   }
 
+  const smoothstep = (a, b, x) => {
+    const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+    return t * t * (3 - 2 * t);
+  };
+
+  // Lay the stitches down in sewing order. Returns, per stitch,
+  // x0 y0 x1 y1 z0 z1 zTop seed (the z's are its center line at each
+  // needle hole and across its middle), plus the final surface heights.
+  function stack(design) {
+    const n = design.segmentCount;
+    const margin = 1.5;
+    const cell = Math.max(0.1, Math.max(design.width, design.height) / 2000);
+    const gw = Math.ceil((design.width + 2 * margin) / cell) + 1;
+    const gh = Math.ceil((design.height + 2 * margin) / cell) + 1;
+    const grid = new Float32Array(gw * gh);
+    const owner = new Int32Array(gw * gh).fill(-1000);  // the stitch that set each cell
+    const cellOf = (v, size) => Math.min(size - 1, Math.max(0, Math.round((v + margin) / cell)));
+    const at = (x, y) => grid[cellOf(y, gh) * gw + cellOf(x, gw)];
+    const out = new Float32Array(n * 8);
+    const seg = design.segments;
+    const core = RX * 0.5;
+    let maxZ = RZ * 2;
+
+    for (let i = 0; i < n; i++) {
+      const x0 = seg[i * 5], y0 = seg[i * 5 + 1], seed = seg[i * 5 + 4];
+      let x1 = seg[i * 5 + 2], y1 = seg[i * 5 + 3];
+      let L = Math.hypot(x1 - x0, y1 - y0);
+      if (L < 0.05) { x1 = x0 + 0.15; L = 0.15; }  // a lone tack
+      const dx = (x1 - x0) / L, dy = (y1 - y0) / L;
+      const mid = L / 2;
+      const ramp = Math.min(RAMP, mid);
+
+      // A taut thread rests on the highest thing beneath its middle. Not
+      // on the stitches sewn just before it, though: those share its
+      // needle hole and lie beside it (satin zigzags back and forth
+      // over almost the same line), they don't lift it.
+      const keep = Math.min(0.3, mid * 0.6);
+      const steps = Math.max(2, Math.ceil(L / cell));
+      let under = 0;
+      for (let k = 0; k <= steps; k++) {
+        const s = (k / steps) * L;
+        if (s < keep || L - s < keep) continue;
+        const g = cellOf(y0 + dy * s, gh) * gw + cellOf(x0 + dx * s, gw);
+        if (owner[g] < i - NEIGHBORS) under = Math.max(under, grid[g]);
+      }
+      // Layers compress under the ones above, so stacks level off.
+      const zTop = RZ + MAX_STACK * (1 - Math.exp(-under / MAX_STACK));
+      // It dips into its needle holes, but only so far below its top.
+      const z0 = Math.max(at(x0, y0) - RZ * 0.5, zTop - HOLE_DIP, -RZ * 0.4);
+      const z1 = Math.max(at(x1, y1) - RZ * 0.5, zTop - HOLE_DIP, -RZ * 0.4);
+      out.set([x0, y0, x1, y1, z0, z1, zTop, seed], i * 8);
+      maxZ = Math.max(maxZ, zTop + RZ);
+
+      // Its core is what later stitches rest on. (Only the core, so
+      // stitches sewn side by side, as in satin, don't climb each other.)
+      const cx0 = cellOf(Math.min(x0, x1) - core, gw), cx1 = cellOf(Math.max(x0, x1) + core, gw);
+      const cy0 = cellOf(Math.min(y0, y1) - core, gh), cy1 = cellOf(Math.max(y0, y1) + core, gh);
+      for (let cy = cy0; cy <= cy1; cy++) {
+        const py = cy * cell - margin;
+        for (let cx = cx0; cx <= cx1; cx++) {
+          const px = cx * cell - margin;
+          const s = Math.min(L, Math.max(0, (px - x0) * dx + (py - y0) * dy));
+          if (Math.hypot(px - x0 - dx * s, py - y0 - dy * s) > core) continue;
+          const rise = smoothstep(0, ramp, Math.min(s, L - s));
+          const zEnd = s < mid ? z0 : z1;
+          const top = zEnd + (zTop - zEnd) * rise + RZ;
+          const g = cy * gw + cx;
+          if (top > grid[g]) {
+            grid[g] = top;
+            owner[g] = i;
+          }
+        }
+      }
+    }
+    return { instances: out, grid, gw, gh, cell, margin, maxZ };
+  }
+
   // ------------------------------------------------------------ shaders
 
-  const STITCH_VS = `#version 300 es
-  in vec2 a_corner;
-  in vec4 a_seg;
-  in float a_seed;
+  const TUBE_VS = `#version 300 es
+  in vec3 a_vert;     // mesh: which end (0 start, 0.5 middle, 1 end), mm from it, angle around
+  in vec4 a_seg;      // x0 y0 x1 y1
+  in vec4 a_z;        // z0 z1 zTop seed
   in vec4 a_color;
-  uniform float u_scale;    // framebuffer px per mm
-  uniform vec2 u_offset;    // framebuffer px of the design's origin
-  uniform vec2 u_size;
-  uniform float u_radius;
-  out vec2 v_local;         // mm along the stitch (from its start), across it
-  out float v_len;
-  out vec2 v_dir;
+  uniform mat4 u_view;
+  uniform float u_rx;
+  uniform float u_rz;
+  uniform float u_ramp;
+  out vec3 v_world;
+  out vec3 v_normal;
+  out vec3 v_tangent;
   out vec3 v_color;
   out float v_seed;
+  out float v_across;
+  out float v_along;
+  out float v_rise;
+
+  float riseAt(float s, float len) { return smoothstep(0.0, min(u_ramp, 0.5 * len), min(s, len - s)); }
+  float centerZ(float s, float len) {
+    return mix(s < 0.5 * len ? a_z.x : a_z.y, a_z.z, riseAt(s, len));
+  }
+
   void main() {
     vec2 d = a_seg.zw - a_seg.xy;
-    float len = length(d);
-    vec2 t = len > 1e-5 ? d / len : vec2(1.0, 0.0);
+    float len = max(length(d), 1e-3);
+    vec2 t = d / len;
     vec2 n = vec2(-t.y, t.x);
-    float r = u_radius + 1.5 / u_scale;  // room for the edge pixels
-    float along = mix(-r, len + r, a_corner.x);
-    float across = a_corner.y * r;
-    vec2 px = (a_seg.xy + t * along + n * across) * u_scale + u_offset;
-    gl_Position = vec4(px.x / u_size.x * 2.0 - 1.0, 1.0 - px.y / u_size.y * 2.0, 0.0, 1.0);
-    v_local = vec2(along, across);
-    v_len = len;
-    v_dir = t;
+    float mid = 0.5 * len;
+    float s = a_vert.x < 0.25 ? min(a_vert.y, mid) : (a_vert.x > 0.75 ? len - min(a_vert.y, mid) : mid);
+    float rise = riseAt(s, len);
+
+    // Direction of the center line, including its climb out of the holes.
+    float sa = max(s - 0.03, 0.0), sb = min(s + 0.03, len);
+    float dz = (centerZ(sb, len) - centerZ(sa, len)) / max(sb - sa, 1e-4);
+    vec3 T = normalize(vec3(t, dz));
+    vec3 up = normalize(vec3(0.0, 0.0, 1.0) - T * T.z);
+    vec3 side = vec3(n, 0.0);
+    // Pinched where the needle pulled it through.
+    float rx = u_rx * mix(0.8, 1.0, rise);
+    float rz = u_rz * mix(0.75, 1.0, rise);
+    float c = cos(a_vert.z), sn = sin(a_vert.z);
+    vec3 pos = vec3(a_seg.xy + t * s, centerZ(s, len)) + side * c * rx + up * sn * rz;
+
+    v_world = pos;
+    v_normal = normalize(side * c / rx + up * sn / rz);
+    v_tangent = T;
     v_color = a_color.rgb;
-    v_seed = a_seed;
+    v_seed = a_z.w;
+    v_across = c;
+    v_along = s;
+    v_rise = rise;
+    gl_Position = u_view * vec4(pos, 1.0);
   }`;
 
-  // Shared by both stitch passes: where this pixel sits on the strand.
-  const STRAND = `
-  in vec2 v_local;
-  in float v_len;
-  in vec2 v_dir;
-  in vec3 v_color;
-  in float v_seed;
-  uniform float u_radius;
-  vec2 strandOffset() {  // from the stitch's center line, in mm
-    return vec2(v_local.x - clamp(v_local.x, 0.0, v_len), v_local.y);
-  }`;
-
-  const HEIGHT_FS = `#version 300 es
-  precision highp float;
-  ${STRAND}
-  uniform float u_height;
-  uniform float u_store;    // mm -> stored units
-  out vec4 o;
-  void main() {
-    float q = length(strandOffset()) / u_radius;
-    if (q > 1.0) discard;
-    // The thread dips into the fabric at each needle hole.
-    float fromEnd = min(v_local.x, v_len - v_local.x);
-    float hole = mix(0.6, 1.0, smoothstep(-u_radius, u_radius * 1.6, fromEnd));
-    float h = sqrt(1.0 - q * q) * hole * u_height * (0.85 + 0.3 * v_seed);
-    o = vec4(h * u_store, 0.0, 0.0, 1.0);
-  }`;
-
-  const THREAD_FS = `#version 300 es
-  precision highp float;
-  ${STRAND}
-  uniform float u_twist;
-  layout(location = 0) out vec4 o_color;
-  layout(location = 1) out vec4 o_shape;
-  void main() {
-    vec2 d = strandOffset();
-    // Short, flat ends: the thread runs on down into the needle hole.
-    if (length(vec2(d.x * 2.0, d.y)) > u_radius) discard;
-    vec2 n = vec2(-v_dir.y, v_dir.x);
-    // Outward on the strand (length 0..1): round across it.
-    vec2 out2 = (v_dir * d.x * 0.35 + n * d.y) / u_radius;
-    // Near the needle holes the thread is in shadow.
-    float fromEnd = min(v_local.x, v_len - v_local.x);
-    float hole = mix(0.55, 1.0, smoothstep(-0.5 * u_radius, u_radius * 1.2, fromEnd));
-    float shade = (0.92 + 0.16 * v_seed) * hole;
-    // alpha: twist phase along the thread (> 0 marks "thread here");
-    // the direction's length carries the hole shadow for the sheen.
-    o_color = vec4(v_color * shade, 0.1 + 0.9 * fract(v_local.x / u_twist + v_seed));
-    o_shape = vec4(v_dir * hole * 0.5 + 0.5, out2 * 0.5 + 0.5);
-  }`;
-
-  const LIGHT_VS = `#version 300 es
-  void main() {
-    vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
-    gl_Position = vec4(p, 0.0, 1.0);
-  }`;
-
-  const LIGHT_FS = `#version 300 es
-  precision highp float;
-  uniform sampler2D u_heightMap;
-  uniform sampler2D u_threadColor;
-  uniform sampler2D u_threadShape;
-  uniform vec2 u_size;
+  // Shared by the thread and the fabric.
+  const LIGHTING = `
+  uniform sampler2D u_grid;
+  uniform vec4 u_gridMap;     // world mm -> grid uv: (xy + map.xy) * map.zw
+  uniform float u_gridMax;
+  uniform vec3 u_light;       // toward the light; x right, y down, z up off the fabric
   uniform float u_mmPerPx;
-  uniform float u_load;     // stored units -> mm
-  uniform vec3 u_light;     // toward the light; x right, y down, z toward the viewer
-  uniform vec3 u_fabric;
-  uniform float u_scale;
-  uniform vec2 u_offset;
-  out vec4 o;
 
-  const float MAX_H = 0.7;
-  const float AMBIENT = 0.38;
+  const float AMBIENT = 0.42;
   const float SUN = 0.85;
 
   vec3 toLinear(vec3 c) { return pow(c, vec3(2.2)); }
   vec3 toSrgb(vec3 c) { return pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2)); }
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-
-  // Stacked stitches pile up, but not without limit.
-  float heightAt(vec2 uv) {
-    float h = texture(u_heightMap, uv).r * u_load;
-    return MAX_H * (1.0 - exp(-h / MAX_H));
+  float hash1(float x) { return fract(sin(x * 91.3458) * 47453.5453); }
+  float noise1(float x) {
+    float i = floor(x);
+    return mix(hash1(i), hash1(i + 1.0), smoothstep(0.0, 1.0, fract(x)));
   }
 
-  // uv offsets for a step in mm; world y runs down the screen, uv.y up.
-  vec2 mmStep(vec2 mm) { return vec2(mm.x, -mm.y) / (u_mmPerPx * u_size); }
+  float surfaceHeight(vec2 w) { return texture(u_grid, (w + u_gridMap.xy) * u_gridMap.zw).r * u_gridMax; }
 
-  float occlusion(vec2 uv, float h) {
+  // 0 in shadow .. 1 lit: is stitching between here and the light?
+  float litFraction(vec3 w) {
+    vec2 dir = normalize(u_light.xy);
+    float rise = u_light.z / length(u_light.xy);  // the light's height gain per mm
+    float lit = 1.0;
+    for (int i = 1; i <= 8; i++) {
+      float d = float(i) * 0.1;
+      float blocker = surfaceHeight(w.xy + dir * d) - w.z - d * rise;
+      lit = min(lit, 1.0 - smoothstep(0.0, 0.06, blocker));
+    }
+    return lit;
+  }
+
+  // Darker where the stitching around stands higher: the sides of a
+  // strand, the gaps between strands, the foot of raised satin.
+  float occlusion(vec3 w) {
     float sum = 0.0;
     for (int i = 0; i < 8; i++) {
       float a = float(i) * 0.7854 + 0.39;
       vec2 dir = vec2(cos(a), sin(a));
-      sum += max(heightAt(uv + mmStep(dir * 0.55)) - h, 0.0);
-      sum += max(heightAt(uv + mmStep(dir * 0.22)) - h, 0.0);
+      sum += max(surfaceHeight(w.xy + dir * 0.3) - w.z, 0.0);
+      sum += max(surfaceHeight(w.xy + dir * 0.9) - w.z, 0.0) * 0.6;
     }
-    return clamp(1.0 - sum / 16.0 * 2.6, 0.3, 1.0);
-  }
+    return clamp(1.0 - sum / 16.0 * 3.0, 0.35, 1.0);
+  }`;
 
-  float shadow(vec2 uv, float h) {
-    vec2 dir = normalize(u_light.xy);
-    float rise = u_light.z / length(u_light.xy);  // light's height gain per mm
-    float lit = 1.0;
-    for (int i = 1; i <= 6; i++) {
-      float d = float(i) * 0.12;
-      float blocker = heightAt(uv + mmStep(dir * d)) - h - d * rise;
-      lit = min(lit, 1.0 - smoothstep(0.0, 0.05, blocker));
-    }
-    return mix(0.5, 1.0, lit);
-  }
-
-  // Broad shape of the surface (satin bulge, layers) from the height map.
-  vec3 surfaceNormal(vec2 uv) {
-    float s = max(0.3, u_mmPerPx);
-    float dx = heightAt(uv + mmStep(vec2(s, 0.0))) - heightAt(uv - mmStep(vec2(s, 0.0)));
-    float dy = heightAt(uv + mmStep(vec2(0.0, s))) - heightAt(uv - mmStep(vec2(0.0, s)));
-    return normalize(vec3(-dx / (2.0 * s), -dy / (2.0 * s), 1.0));
-  }
+  const TUBE_FS = `#version 300 es
+  precision highp float;
+  in vec3 v_world;
+  in vec3 v_normal;
+  in vec3 v_tangent;
+  in vec3 v_color;
+  in float v_seed;
+  in float v_across;
+  in float v_along;
+  in float v_rise;
+  ${LIGHTING}
+  uniform float u_twist;
+  out vec4 o;
 
   void main() {
-    vec2 uv = gl_FragCoord.xy / u_size;
-    vec2 world = (vec2(gl_FragCoord.x, u_size.y - gl_FragCoord.y) - u_offset) / u_scale;
     vec3 L = normalize(u_light);
     vec3 V = vec3(0.0, 0.0, 1.0);
-    float h = heightAt(uv);
-    float ao = occlusion(uv, h);
-    float sh = shadow(uv, h);
-    // Fine detail (twist, weave) only once it's big enough to see.
-    float fine = smoothstep(0.07, 0.025, u_mmPerPx);
+    vec3 T = normalize(v_tangent);
+    vec3 N = normalize(v_normal);
+    // Fine filaments, twisting gently along the thread (once big enough to see).
+    float fine = smoothstep(0.12, 0.04, u_mmPerPx);
+    float fc = (v_across * 0.5 + 0.5) * 7.0 + (v_along / u_twist + v_seed * 7.0) * 2.0;
+    float fibers = 0.55 * noise1(fc) + 0.3 * noise1(fc * 2.7 + 17.0)
+                 + 0.15 * noise1(v_along * 6.0 + floor(fc) * 13.0);
+    vec3 B = normalize(cross(T, N));
+    N = normalize(N + B * (fibers - 0.5) * 0.7 * fine);
+    vec3 Tn = normalize(T - N * dot(N, T));
 
-    vec4 thread = texture(u_threadColor, uv);
-    vec3 color;
-    if (thread.a > 0.05) {
-      vec4 shape = texture(u_threadShape, uv);
-      vec2 t = shape.xy * 2.0 - 1.0;
-      float hole = length(t);
-      t /= max(hole, 1e-3);
-      vec2 out2 = shape.zw * 2.0 - 1.0;
-      float q2 = min(dot(out2, out2), 1.0);
-      // Round strand, tilted by the broad surface shape.
-      vec3 N = normalize(vec3(out2, sqrt(1.0 - q2)) + vec3(surfaceNormal(uv).xy * 0.5, 0.0));
-      // The plies twisting around the thread.
-      float across = dot(out2, vec2(-t.y, t.x));
-      float phase = (thread.a - 0.1) / 0.9;
-      float ridge = sin(6.2832 * (2.0 * phase + 1.4 * across));
-      N = normalize(N + vec3(t, 0.0) * ridge * 0.18 * fine);
+    float ao = occlusion(v_world);
+    float sh = mix(0.45, 1.0, litFraction(v_world));
+    vec3 Hv = normalize(L + V);
+    // Light wraps a little around the soft, fuzzy strand.
+    float lambert = max((dot(N, L) + 0.35) / 1.35, 0.0);
+    float tl = dot(Tn, L);
+    float diffuse = 0.75 * lambert + 0.25 * sqrt(max(1.0 - tl * tl, 0.0));
+    // Two sheen lobes along the fiber: a soft whitish shine, and a broader
+    // one tinted by the thread (light that went through the fiber).
+    float h1 = dot(normalize(Tn + N * 0.08), Hv);
+    float h2 = dot(normalize(Tn - N * 0.12), Hv);
+    float shine = pow(sqrt(max(1.0 - h1 * h1, 0.0)), 36.0);
+    float glow = pow(sqrt(max(1.0 - h2 * h2, 0.0)), 10.0);
+    float facing = smoothstep(0.0, 0.3, dot(N, L)) * v_rise;
 
-      vec3 T = normalize(vec3(t, 0.0) - N * dot(N, vec3(t, 0.0)));
-      vec3 Hv = normalize(L + V);
-      float lambert = max(dot(N, L), 0.0);
-      float tl = dot(T, L);
-      float diffuse = 0.7 * lambert + 0.3 * sqrt(max(1.0 - tl * tl, 0.0));
-      // Two sheen lobes along the fiber: a white glint, and a softer one
-      // tinted by the thread's color (light that went through the fiber).
-      vec3 T1 = normalize(T + N * 0.1);
-      vec3 T2 = normalize(T - N * 0.15);
-      float h1 = dot(T1, Hv);
-      float h2 = dot(T2, Hv);
-      float glint = pow(sqrt(max(1.0 - h1 * h1, 0.0)), 70.0);
-      float glow = pow(sqrt(max(1.0 - h2 * h2, 0.0)), 22.0);
-      float facing = smoothstep(0.0, 0.3, dot(N, L)) * smoothstep(0.6, 1.0, hole);
+    vec3 albedo = toLinear(v_color) * (0.94 + 0.12 * v_seed)
+                * (1.0 + (fibers - 0.5) * 0.35 * fine) * mix(0.7, 1.0, v_rise);
+    vec3 color = albedo * (AMBIENT * ao + SUN * diffuse * sh)
+               + (vec3(0.12) * shine + albedo * 0.35 * glow) * facing * sh * ao;
+    o = vec4(toSrgb(color), 1.0);
+  }`;
 
-      vec3 albedo = toLinear(thread.rgb);
-      color = albedo * (AMBIENT * ao + SUN * diffuse * sh)
-            + (vec3(0.24) * glint + albedo * 0.4 * glow) * facing * sh * ao;
-    } else {
-      // Plain-weave fabric.
-      vec2 p = world / 0.3;
-      vec2 cell = floor(p);
-      vec2 f = fract(p) - 0.5;
-      bool warp = mod(cell.x + cell.y, 2.0) < 1.0;
-      vec2 tilt = warp ? vec2(-f.x * 1.4, -f.y * 0.5) : vec2(-f.x * 0.5, -f.y * 1.4);
-      vec3 N = normalize(vec3(tilt * fine, 1.0));
-      float grain = hash(cell) * 0.08 * fine + hash(floor(world * 3.0)) * 0.03;
-      vec3 albedo = toLinear(u_fabric) * (0.95 + grain);
-      color = albedo * (AMBIENT * ao + SUN * max(dot(N, L), 0.0) * sh);
-    }
+  const FABRIC_VS = `#version 300 es
+  uniform float u_depth;
+  void main() {
+    vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
+    gl_Position = vec4(p, u_depth, 1.0);
+  }`;
+
+  const FABRIC_FS = `#version 300 es
+  precision highp float;
+  ${LIGHTING}
+  uniform vec2 u_size;
+  uniform float u_scale;
+  uniform vec2 u_offset;
+  uniform vec3 u_fabric;
+  out vec4 o;
+
+  void main() {
+    vec2 world = (vec2(gl_FragCoord.x, u_size.y - gl_FragCoord.y) - u_offset) / u_scale;
+    vec3 w = vec3(world, 0.0);
+    // A fine plain weave, only once big enough to see.
+    float fine = smoothstep(0.05, 0.02, u_mmPerPx);
+    vec2 p = world / 0.18;
+    vec2 cell = floor(p);
+    vec2 f = fract(p) - 0.5;
+    bool warp = mod(cell.x + cell.y, 2.0) < 1.0;
+    vec2 tilt = warp ? vec2(-f.x, -f.y * 0.3) : vec2(-f.x * 0.3, -f.y);
+    vec3 N = normalize(vec3(tilt * 0.25 * fine, 1.0));
+    float grain = (hash(cell) - 0.5) * 0.04 * fine + (hash(floor(world * 2.0)) - 0.5) * 0.02;
+    vec3 albedo = toLinear(u_fabric) * (1.0 + grain);
+    float sh = mix(0.45, 1.0, litFraction(w));
+    vec3 color = albedo * (AMBIENT * occlusion(w) + SUN * max(dot(N, normalize(u_light)), 0.0) * sh);
     o = vec4(toSrgb(color), 1.0);
   }`;
 
@@ -299,10 +359,7 @@
       if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
       gl.attachShader(program, shader);
     }
-    gl.bindAttribLocation(program, 0, "a_corner");
-    gl.bindAttribLocation(program, 1, "a_seg");
-    gl.bindAttribLocation(program, 2, "a_seed");
-    gl.bindAttribLocation(program, 3, "a_color");
+    ["a_vert", "a_seg", "a_z", "a_color"].forEach((name, i) => gl.bindAttribLocation(program, i, name));
     gl.linkProgram(program);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
     const uniforms = {};
@@ -313,157 +370,149 @@
     return { program, uniforms };
   }
 
+  // A half cylinder (only the top shows) along a stitch: rings at mm from
+  // each end, closer together where it climbs out of the needle holes.
+  function tubeMesh(sides, fromEnds) {
+    const rings = [
+      ...fromEnds.map((mm) => [0, mm]),
+      [0.5, 0],
+      ...fromEnds.slice().reverse().map((mm) => [1, mm]),
+    ];
+    const verts = [];
+    for (const [end, mm] of rings) {
+      for (let j = 0; j <= sides; j++) verts.push(end, mm, (Math.PI * j) / sides);
+    }
+    const index = [];
+    for (let r = 0; r < rings.length - 1; r++) {
+      for (let j = 0; j < sides; j++) {
+        const a = r * (sides + 1) + j;
+        const b = a + sides + 1;
+        index.push(a, b, a + 1, a + 1, b, b + 1);
+      }
+    }
+    return { verts: new Float32Array(verts), index: new Uint16Array(index) };
+  }
+
+  const MESHES = {
+    near: tubeMesh(8, [0, 0.05, 0.13, 0.24, 0.36, 0.45]),
+    far: tubeMesh(3, [0, 0.2, 0.45]),
+  };
+  const NEAR_PX_PER_MM = 12;  // switch to the detailed mesh from here in
+
   class WebGLRenderer {
     constructor(canvas) {
-      const gl = canvas.getContext("webgl2", { antialias: false, preserveDrawingBuffer: true, alpha: false });
+      const gl = canvas.getContext("webgl2", { antialias: true, preserveDrawingBuffer: true, alpha: false });
       if (!gl) throw new Error("WebGL2 unavailable");
       this.gl = gl;
       this.kind = "webgl";
-      this.floatHeights = !!(gl.getExtension("EXT_color_buffer_float") || gl.getExtension("EXT_color_buffer_half_float"));
-      this.heightProgram = compile(gl, STITCH_VS, HEIGHT_FS);
-      this.threadProgram = compile(gl, STITCH_VS, THREAD_FS);
-      this.lightProgram = compile(gl, LIGHT_VS, LIGHT_FS);
-
-      this.vao = gl.createVertexArray();
-      gl.bindVertexArray(this.vao);
-      gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, -1, 1, -1, 0, 1, 1, 1]), gl.STATIC_DRAW);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-      this.segmentBuffer = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.segmentBuffer);
-      gl.enableVertexAttribArray(1);
-      gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 20, 0);
-      gl.vertexAttribDivisor(1, 1);
-      gl.enableVertexAttribArray(2);
-      gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 20, 16);
-      gl.vertexAttribDivisor(2, 1);
-      this.colorBuffer = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.colorBuffer);
-      gl.enableVertexAttribArray(3);
-      gl.vertexAttribPointer(3, 4, gl.UNSIGNED_BYTE, true, 4, 0);
-      gl.vertexAttribDivisor(3, 1);
-      gl.bindVertexArray(null);
-
-      this.targets = null;
-      this.count = 0;
+      this.supersample = 1;  // the canvas is multisampled instead
       this.maxSize = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE), 4096);
+      this.tube = compile(gl, TUBE_VS, TUBE_FS);
+      this.fabric = compile(gl, FABRIC_VS, FABRIC_FS);
+
+      this.instances = gl.createBuffer();
+      this.colors = gl.createBuffer();
+      this.meshes = {};
+      for (const [name, mesh] of Object.entries(MESHES)) {
+        const vao = gl.createVertexArray();
+        gl.bindVertexArray(vao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+        gl.bufferData(gl.ARRAY_BUFFER, mesh.verts, gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.instances);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 32, 0);
+        gl.vertexAttribDivisor(1, 1);
+        gl.enableVertexAttribArray(2);
+        gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 32, 16);
+        gl.vertexAttribDivisor(2, 1);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.colors);
+        gl.enableVertexAttribArray(3);
+        gl.vertexAttribPointer(3, 4, gl.UNSIGNED_BYTE, true, 4, 0);
+        gl.vertexAttribDivisor(3, 1);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer());
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.index, gl.STATIC_DRAW);
+        gl.bindVertexArray(null);
+        this.meshes[name] = { vao, count: mesh.index.length };
+      }
+
+      this.gridTexture = gl.createTexture();
+      this.count = 0;
     }
 
     setDesign(design) {
       const gl = this.gl;
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.segmentBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, design.segments, gl.STATIC_DRAW);
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.colorBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, design.segmentColors, gl.STATIC_DRAW);
+      const st = design.stack || (design.stack = stack(design));
+      this.stacked = st;
       this.count = design.segmentCount;
-    }
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.instances);
+      gl.bufferData(gl.ARRAY_BUFFER, st.instances, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.colors);
+      gl.bufferData(gl.ARRAY_BUFFER, design.segmentColors, gl.STATIC_DRAW);
 
-    texture(internalFormat, format, type, filter, w, h) {
-      const gl = this.gl;
-      const tex = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, type, null);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+      const bytes = new Uint8Array(st.grid.length);
+      for (let i = 0; i < bytes.length; i++) bytes[i] = Math.round((st.grid[i] / st.maxZ) * 255);
+      gl.bindTexture(gl.TEXTURE_2D, this.gridTexture);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, st.gw, st.gh, 0, gl.RED, gl.UNSIGNED_BYTE, bytes);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      return tex;
-    }
-
-    makeTargets(w, h) {
-      const gl = this.gl;
-      if (this.targets && this.targets.w === w && this.targets.h === h) return;
-      if (this.targets) {
-        for (const t of this.targets.textures) gl.deleteTexture(t);
-        gl.deleteFramebuffer(this.targets.heightFb);
-        gl.deleteFramebuffer(this.targets.threadFb);
-      }
-      const heightFb = gl.createFramebuffer();
-      gl.bindFramebuffer(gl.FRAMEBUFFER, heightFb);
-      let height = null;
-      if (this.floatHeights) {
-        height = this.texture(gl.R16F, gl.RED, gl.HALF_FLOAT, gl.LINEAR, w, h);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, height, 0);
-        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
-          gl.deleteTexture(height);
-          height = null;
-          this.floatHeights = false;
-        }
-      }
-      if (!height) {
-        height = this.texture(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR, w, h);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, height, 0);
-      }
-      const threadFb = gl.createFramebuffer();
-      gl.bindFramebuffer(gl.FRAMEBUFFER, threadFb);
-      const color = this.texture(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.NEAREST, w, h);
-      const shape = this.texture(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.NEAREST, w, h);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, color, 0);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, shape, 0);
-      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      this.targets = { w, h, heightFb, threadFb, height, color, shape, textures: [height, color, shape] };
-    }
-
-    stitchUniforms(p, scale, offset, w, h) {
-      const gl = this.gl;
-      gl.useProgram(p.program);
-      gl.uniform1f(p.uniforms.u_scale, scale);
-      gl.uniform2f(p.uniforms.u_offset, offset[0], offset[1]);
-      gl.uniform2f(p.uniforms.u_size, w, h);
-      gl.uniform1f(p.uniforms.u_radius, THREAD_RADIUS);
     }
 
     render({ width, height, scale, offset, fabric, light }) {
       const gl = this.gl;
-      if (gl.isContextLost()) return;
-      this.makeTargets(width, height);
-      const t = this.targets;
-      gl.viewport(0, 0, width, height);
-      gl.bindVertexArray(this.vao);
+      if (gl.isContextLost() || !this.stacked) return;
+      const st = this.stacked;
+      const zMin = -0.5, zMax = st.maxZ + 0.5;
+      const view = new Float32Array([
+        (2 * scale) / width, 0, 0, 0,
+        0, (-2 * scale) / height, 0, 0,
+        0, 0, -2 / (zMax - zMin), 0,
+        (2 * offset[0]) / width - 1, 1 - (2 * offset[1]) / height, 1 + (2 * zMin) / (zMax - zMin), 1,
+      ]);
+      const mesh = scale >= NEAR_PX_PER_MM ? this.meshes.near : this.meshes.far;
 
-      // 1. Height map: every stitch adds its ridge.
-      const store = this.floatHeights ? 1 : 1 / HEIGHT_RANGE;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, t.heightFb);
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE);
-      this.stitchUniforms(this.heightProgram, scale, offset, width, height);
-      gl.uniform1f(this.heightProgram.uniforms.u_height, THREAD_HEIGHT);
-      gl.uniform1f(this.heightProgram.uniforms.u_store, store);
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.count);
-      gl.disable(gl.BLEND);
-
-      // 2. Thread: the last stitch sewn over each pixel wins, as on fabric.
-      gl.bindFramebuffer(gl.FRAMEBUFFER, t.threadFb);
-      gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
-      gl.clearBufferfv(gl.COLOR, 1, [0, 0, 0, 0]);
-      this.stitchUniforms(this.threadProgram, scale, offset, width, height);
-      gl.uniform1f(this.threadProgram.uniforms.u_twist, TWIST_PERIOD);
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, this.count);
-      gl.bindVertexArray(null);
-
-      // 3. Light it.
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      const p = this.lightProgram;
-      gl.useProgram(p.program);
-      [t.height, t.color, t.shape].forEach((tex, i) => {
-        gl.activeTexture(gl.TEXTURE0 + i);
-        gl.bindTexture(gl.TEXTURE_2D, tex);
-      });
-      gl.uniform1i(p.uniforms.u_heightMap, 0);
-      gl.uniform1i(p.uniforms.u_threadColor, 1);
-      gl.uniform1i(p.uniforms.u_threadShape, 2);
-      gl.uniform2f(p.uniforms.u_size, width, height);
-      gl.uniform1f(p.uniforms.u_mmPerPx, 1 / scale);
-      gl.uniform1f(p.uniforms.u_load, 1 / store);
-      gl.uniform3f(p.uniforms.u_light, ...light);
-      gl.uniform3f(p.uniforms.u_fabric, ...fabric.map((c) => c / 255));
-      gl.uniform1f(p.uniforms.u_scale, scale);
-      gl.uniform2f(p.uniforms.u_offset, offset[0], offset[1]);
+      gl.viewport(0, 0, width, height);
+      // No depth test: where stitches overlap, the one sewn later lies on
+      // top, so drawing in sewing order is exactly right.
+      gl.disable(gl.DEPTH_TEST);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.gridTexture);
+      const lighting = (p) => {
+        gl.useProgram(p.program);
+        gl.uniform1i(p.uniforms.u_grid, 0);
+        const k = 1 / st.cell;
+        gl.uniform4f(p.uniforms.u_gridMap, st.margin + st.cell / 2, st.margin + st.cell / 2, k / st.gw, k / st.gh);
+        gl.uniform1f(p.uniforms.u_gridMax, st.maxZ);
+        gl.uniform3f(p.uniforms.u_light, ...light);
+        gl.uniform1f(p.uniforms.u_mmPerPx, 1 / scale);
+      };
+
+      const f = this.fabric;
+      lighting(f);
+      gl.uniform1f(f.uniforms.u_depth, 0);
+      gl.uniform2f(f.uniforms.u_size, width, height);
+      gl.uniform1f(f.uniforms.u_scale, scale);
+      gl.uniform2f(f.uniforms.u_offset, offset[0], offset[1]);
+      gl.uniform3f(f.uniforms.u_fabric, ...fabric.map((c) => c / 255));
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+      const t = this.tube;
+      lighting(t);
+      gl.uniformMatrix4fv(t.uniforms.u_view, false, view);
+      gl.uniform1f(t.uniforms.u_rx, RX);
+      gl.uniform1f(t.uniforms.u_rz, RZ);
+      gl.uniform1f(t.uniforms.u_ramp, RAMP);
+      gl.uniform1f(t.uniforms.u_twist, TWIST_PERIOD);
+      gl.bindVertexArray(mesh.vao);
+      gl.drawElementsInstanced(gl.TRIANGLES, mesh.count, gl.UNSIGNED_SHORT, 0, this.count);
+      gl.bindVertexArray(null);
     }
   }
 
@@ -497,10 +546,10 @@
         if (run.count === 1) path.lineTo(pts[run.start * 2] + 0.01, pts[run.start * 2 + 1]);
         // A darker edge and a lighter core make each strand read as round.
         ctx.strokeStyle = tone(rgb, 0.8);
-        ctx.lineWidth = Math.max(THREAD_RADIUS * 2, px);
+        ctx.lineWidth = Math.max(RX * 2, px);
         ctx.stroke(path);
         ctx.strokeStyle = tone(rgb, 1.12);
-        ctx.lineWidth = Math.max(THREAD_RADIUS * 0.9, px * 0.5);
+        ctx.lineWidth = Math.max(RX * 0.9, px * 0.5);
         ctx.stroke(path);
       }
     }
@@ -583,7 +632,7 @@
       if (!this.design || !cssW || !cssH) return;
       const dpr = window.devicePixelRatio || 1;
       // Supersample a little: thread edges are finer than a pixel when zoomed out.
-      let ss = dpr >= 2 ? 1.25 : 2;
+      let ss = this.renderer.supersample || (dpr >= 2 ? 1.25 : 2);
       ss = Math.min(ss, this.renderer.maxSize / (Math.max(cssW, cssH) * dpr), Math.sqrt(9e6 / (cssW * cssH * dpr * dpr)));
       const k = dpr * Math.max(ss, 0.5);
       const width = Math.round(cssW * k);
@@ -676,5 +725,5 @@
     }
   }
 
-  window.StitchView = { parse, View };
+  window.StitchView = { parse, stack, View };
 })();

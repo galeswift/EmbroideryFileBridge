@@ -315,6 +315,32 @@ def test_viewer_draws_the_stitches(site):
     assert 0.02 < site.page.evaluate(THREAD_COVERAGE_JS) < 0.9
 
 
+STACK_SATIN_JS = """() => {
+  // A satin column: 400 stitches zigzagging across 4 mm, 0.1 mm apart...
+  const segs = [];
+  for (let i = 0; i < 400; i++) {
+    const y = i * 0.1;
+    segs.push(i % 2 ? 4 : 0, y, i % 2 ? 0 : 4, y + 0.1, 0.5);
+  }
+  // ...then one long stitch sewn over it, along the column.
+  segs.push(2, -1, 2.2, 41, 0.5);
+  const n = segs.length / 5;
+  const st = StitchView.stack({ width: 5, height: 42, segments: new Float32Array(segs), segmentCount: n });
+  const top = (i) => st.instances[i * 8 + 6];
+  let satin = 0;
+  for (let i = 0; i < 400; i++) satin = Math.max(satin, top(i));
+  return { satin, over: top(400), maxZ: st.maxZ };
+}"""
+
+
+def test_stacking_satin_lies_flat_and_later_stitches_lie_on_top(site):
+    open_page(site)
+    z = site.page.evaluate(STACK_SATIN_JS)
+    assert z["satin"] < 0.2  # side by side, not climbing each other
+    assert z["over"] > z["satin"] + 0.05  # resting on the satin
+    assert z["maxZ"] < 1
+
+
 def test_viewer_uses_webgl_when_available(site):
     has_webgl = site.page.evaluate("!!document.createElement('canvas').getContext('webgl2')")
     if not has_webgl:

@@ -41,9 +41,10 @@ none of those limits.
    * **Design previews** drawn from each file's stitch data (PES, DST,
      JEF, EXP, VP3, …), with a detail view showing size, stitch count and
      thread colors.
-   * **A realistic stitch view**: opening a design draws every stitch as
-     lit, twisted thread on fabric (WebGL, in your browser; a simpler
-     drawing on devices without it). Scroll or pinch to zoom right in
+   * **A realistic stitch view**: opening a design builds every stitch
+     as a 3D strand of thread, stacked in sewing order the way the
+     machine lays them down, and lights it (WebGL, in your browser; a
+     simpler drawing on devices without it). Scroll or pinch to zoom right in
      on the stitches, drag to look around, double-click to fit.
    * **Folders**: create them, upload whole folders (button or drag and
      drop), move things between them. Each folder's card previews a few
