@@ -26,7 +26,7 @@
   const RX = 0.25;              // mm: half the width thread spreads to
   const RZ = 0.11;              // mm: half its thickness, flattened by tension
   const RAMP = 0.45;            // mm over which it climbs out of a needle hole
-  const HOLE_DIP = RZ * 1.4;    // mm a stitch sinks at its needle holes, at most
+  const HOLE_DIP = RZ * 0.8;    // mm a stitch sinks at its needle holes, at most
   const MAX_STACK = 0.55;       // mm: how high layers of stitching can pile up
   const NEIGHBORS = 3;          // stitches just before this one lie beside it, not under it
   const TWIST_PERIOD = 0.5;     // mm per turn of the thread's twist
@@ -147,7 +147,8 @@
         if (older(fullOwner, g)) right = Math.max(right, full[g]);
       }
       // Layers compress under the ones above, so stacks level off.
-      const zTop = RZ + MAX_STACK * (1 - Math.exp(-under / MAX_STACK));
+      // (Tension varies from stitch to stitch, and so does how high it sits.)
+      const zTop = RZ + MAX_STACK * (1 - Math.exp(-under / MAX_STACK)) + (((seed * 7919.123) % 1) - 0.5) * 0.03;
       // It dips into its needle holes, but only so far below its top.
       const z0 = Math.max(core[index(x0, y0)] - RZ * 0.5, zTop - HOLE_DIP, -RZ * 0.4);
       const z1 = Math.max(core[index(x1, y1)] - RZ * 0.5, zTop - HOLE_DIP, -RZ * 0.4);
@@ -224,13 +225,17 @@
     vec3 up = normalize(vec3(0.0, 0.0, 1.0) - T * T.z);
     vec3 side = vec3(n, 0.0);
     // A flattened cross-section, pinched where the needle pulled it through.
-    float rx = u_rx * mix(0.8, 1.0, rise);
-    float rz = u_rz * mix(0.75, 1.0, rise);
+    // No two stitches are quite alike: tension varies their width and
+    // thickness, and a strand bows a little between its holes.
+    float seed = a_z.w;
+    float rx = u_rx * mix(0.8, 1.0, rise) * (0.9 + 0.2 * fract(seed * 37.13));
+    float rz = u_rz * mix(0.75, 1.0, rise) * (0.85 + 0.3 * fract(seed * 91.71));
+    float bow = (fract(seed * 53.37) - 0.5) * 0.08 * min(mid, 1.0) * sin(3.14159 * s / len);
     float c = cos(a_vert.z), sn = sin(a_vert.z);
     // Each edge rides up over any older strand it overlaps.
     float lift = (c >= 0.0 ? a_lift.x : a_lift.y) * rise;
     float ac = abs(c);
-    vec3 pos = vec3(a_seg.xy + t * s, centerZ(s, len)) + side * c * rx + up * sn * rz
+    vec3 pos = vec3(a_seg.xy + t * s + n * bow, centerZ(s, len)) + side * c * rx + up * sn * rz
              + vec3(0.0, 0.0, lift * pow(ac, 1.5));
     vec3 normal = normalize(side * c / rx + up * sn / rz);
     float slope = lift * 1.5 * sqrt(ac) * sign(c) / rx;
@@ -270,8 +275,9 @@
   uniform float u_zBase;
   uniform float u_zRange;
   layout(location = 0) out vec4 o_albedo;   // thread color; alpha 1 = thread here
-  layout(location = 1) out vec4 o_normal;   // normal xy, height (16 bits over two channels)
+  layout(location = 1) out vec4 o_normal;   // normal xy
   layout(location = 2) out vec4 o_fiber;    // fiber direction xy, fiber texture, needle-hole shade
+  layout(location = 3) out vec4 o_height;   // 0..1 over zBase..zBase + zRange
   ${NOISE}
 
   void main() {
@@ -290,8 +296,13 @@
     vec3 albedo = v_color * (0.95 + 0.1 * v_seed) * (1.0 + (fibers - 0.5) * 0.3 * fine);
     float h = clamp((v_height - u_zBase) / u_zRange, 0.0, 1.0);
     o_albedo = vec4(albedo, 1.0);
-    o_normal = vec4(N.xy * 0.5 + 0.5, floor(h * 255.0) / 255.0, fract(h * 255.0));
+    o_normal = vec4(N.xy * 0.5 + 0.5, 0.0, 1.0);
     o_fiber = vec4(T.xy * 0.5 + 0.5, mix(0.5, fibers, fine), v_rise);
+  #ifdef FLOAT_HEIGHT
+    o_height = vec4(h, 0.0, 0.0, 1.0);
+  #else
+    o_height = vec4(floor(h * 255.0) / 255.0, fract(h * 255.0), 0.0, 1.0);  // 16 bits over two channels
+  #endif
   }`;
 
   // Pass 2 (light): per pixel, physically based shading of thread and fabric.
@@ -303,12 +314,17 @@
 
   const LIGHT_FS = `#version 300 es
   precision highp float;
-  uniform sampler2D u_albedo;
+  uniform sampler2D u_albedo;   // the surface buffers, seen from straight above
   uniform sampler2D u_normal;
   uniform sampler2D u_fiber;
-  uniform vec2 u_size;
-  uniform float u_scale;      // px per mm
-  uniform vec2 u_offset;
+  uniform sampler2D u_height;
+  uniform vec2 u_size;          // canvas px
+  uniform float u_scale;        // canvas px per mm
+  uniform vec2 u_offset;        // canvas px of the (tilted) view's origin
+  uniform vec2 u_tilt;          // sin, cos of the camera's tilt toward the viewer
+  uniform vec2 u_topSize;       // surface buffers: px,
+  uniform float u_topScale;     // px per mm,
+  uniform vec2 u_topOffset;     // px of the design's origin
   uniform float u_zBase;
   uniform float u_zRange;
   uniform vec3 u_fabric;
@@ -333,26 +349,38 @@
 
   vec3 toLinear(vec3 c) { return pow(c, vec3(2.2)); }
 
-  float heightAt(vec2 uv) {
-    vec4 n = texture(u_normal, uv);
-    return u_zBase + (n.z + n.w / 255.0) * u_zRange;
+  // Where a point on the design is in the surface buffers.
+  vec2 topUv(vec2 world) {
+    vec2 px = world * u_topScale + u_topOffset;
+    return vec2(px.x, u_topSize.y - px.y) / u_topSize;
   }
 
-  // uv offset for a step in mm (world y runs down the screen, uv.y up).
-  vec2 mmStep(vec2 mm) { return vec2(mm.x, -mm.y) * u_scale / u_size; }
+  float heightAt(vec2 world) {
+    vec4 h = texture(u_height, topUv(world));
+  #ifdef FLOAT_HEIGHT
+    return u_zBase + h.r * u_zRange;
+  #else
+    return u_zBase + (h.r + h.g / 255.0) * u_zRange;
+  #endif
+  }
+
+  // Interleaved gradient noise: a different offset per pixel, which the
+  // supersampling then averages away, instead of regular banding.
+  float jitter() { return fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))); }
 
   // Horizon-based ambient occlusion from the rendered heights: how much
   // of the sky the stitching around blocks.
-  float occlusion(vec2 uv, float h) {
+  float occlusion(vec2 p, float h) {
     float occ = 0.0;
-    float nearest = 0.7 / u_scale;
+    float nearest = 0.7 / u_topScale;
+    float spin = jitter() * 0.7854;
     for (int i = 0; i < 8; i++) {
-      float a = float(i) * 0.7854 + 0.3927;
+      float a = float(i) * 0.7854 + spin;
       vec2 dir = vec2(cos(a), sin(a));
       float horizon = 0.0;
       for (int j = 1; j <= 4; j++) {
         float d = max(AO_RADIUS * float(j * j) / 16.0, nearest * float(j));
-        float dh = heightAt(uv + mmStep(dir * d)) - h;
+        float dh = heightAt(p + dir * d) - h;
         horizon = max(horizon, dh / sqrt(dh * dh + d * d));
       }
       occ += horizon;
@@ -360,16 +388,19 @@
     return clamp(1.0 - occ / 8.0 * 1.2, 0.3, 1.0);
   }
 
-  // Is stitching between here and the key light?
-  float keyShadow(vec2 uv, float h) {
+  // How much of the key light (a softbox) reaches here past the stitching
+  // in between. The farther away what blocks it, the softer its shadow.
+  float keyShadow(vec2 p, float h) {
     vec3 l = normalize(KEY_DIR);
     vec2 dir = normalize(l.xy);
     float rise = l.z / length(l.xy);
     float lit = 1.0;
-    for (int i = 1; i <= 10; i++) {
-      float d = float(i) * 0.07;
-      float blocker = heightAt(uv + mmStep(dir * d)) - h - d * rise;
-      lit = min(lit, 1.0 - smoothstep(0.0, 0.03, blocker));
+    float start = jitter();
+    for (int i = 0; i < 16; i++) {
+      float d = (float(i) + start) * 0.06 + 0.01;
+      float blocker = heightAt(p + dir * d) - h - d * rise;
+      float penumbra = 0.01 + d * SOFTBOX * 0.6;
+      lit = min(lit, 1.0 - smoothstep(-penumbra, penumbra, blocker));
     }
     return lit;
   }
@@ -399,8 +430,7 @@
   }
   float sheenVisibility(float nv, float nl) { return 1.0 / (4.0 * (nl + nv - nl * nv)); }
 
-  vec3 threadLight(vec3 N, vec3 T, vec3 albedo, float rough, float hole, vec3 L, vec3 radiance) {
-    vec3 V = vec3(0.0, 0.0, 1.0);
+  vec3 threadLight(vec3 N, vec3 T, vec3 V, vec3 albedo, float rough, float hole, vec3 L, vec3 radiance) {
     float nl = dot(N, L);
     if (nl <= 0.0) return vec3(0.0);
     vec3 B = normalize(cross(N, T));
@@ -419,7 +449,7 @@
 
   // The key light is a big softbox, not a point: it's what lays long soft
   // highlights along the thread. Integrated over a 3 x 3 grid of directions.
-  vec3 softboxLight(vec3 N, vec3 T, vec3 albedo, float rough, float hole, vec3 radiance) {
+  vec3 softboxLight(vec3 N, vec3 T, vec3 V, vec3 albedo, float rough, float hole, vec3 radiance) {
     vec3 k = normalize(KEY_DIR);
     vec3 u = normalize(cross(k, vec3(0.0, 0.0, 1.0)));
     vec3 v = cross(u, k);
@@ -427,7 +457,7 @@
     for (int i = -1; i <= 1; i++) {
       for (int j = -1; j <= 1; j++) {
         vec3 L = normalize(k + (u * float(i) + v * float(j)) * SOFTBOX);
-        sum += threadLight(N, T, albedo, rough, hole, L, radiance);
+        sum += threadLight(N, T, V, albedo, rough, hole, L, radiance);
       }
     }
     return sum / 9.0;
@@ -439,13 +469,36 @@
   }
 
   void main() {
-    vec2 uv = gl_FragCoord.xy / u_size;
-    vec2 world = (vec2(gl_FragCoord.x, u_size.y - gl_FragCoord.y) - u_offset) / u_scale;
-    vec3 key = normalize(KEY_DIR), fill = normalize(FILL_DIR);
-    float h = heightAt(uv);
-    float ao = occlusion(uv, h);
-    float lit = keyShadow(uv, h);
+    // This pixel's line of sight. Tilted toward the viewer, a point at
+    // height z shows at screen y = y cos - z sin, so trace the ray down
+    // through the height map (relief mapping) to where it meets stitching.
+    vec2 screen = (vec2(gl_FragCoord.x, u_size.y - gl_FragCoord.y) - u_offset) / u_scale;
+    float sn = u_tilt.x, cs = u_tilt.y;
+    vec3 p = vec3(screen, 0.0);
+    if (sn < 1e-3) {
+      p.z = heightAt(p.xy);
+    } else {
+      float zHi = u_zBase + u_zRange, zLo = -0.02;
+      float above = zHi, below = zLo;
+      for (int i = 1; i <= 48; i++) {
+        float z = mix(zHi, zLo, float(i) / 48.0);
+        if (heightAt(vec2(screen.x, (screen.y + z * sn) / cs)) >= z) { below = z; break; }
+        above = z;
+      }
+      for (int i = 0; i < 6; i++) {
+        float z = 0.5 * (above + below);
+        if (heightAt(vec2(screen.x, (screen.y + z * sn) / cs)) >= z) below = z; else above = z;
+      }
+      p.y = (screen.y + below * sn) / cs;
+      p.z = heightAt(p.xy);
+    }
+    vec3 V = normalize(vec3(0.0, sn, cs));
 
+    vec3 key = normalize(KEY_DIR), fill = normalize(FILL_DIR);
+    float ao = occlusion(p.xy, p.z);
+    float lit = keyShadow(p.xy, p.z);
+
+    vec2 uv = topUv(p.xy);
     vec4 albedoT = texture(u_albedo, uv);
     vec4 n = texture(u_normal, uv);
     vec3 N = vec3(n.xy * 2.0 - 1.0, 0.0);
@@ -460,16 +513,16 @@
       float rough = mix(0.75, 1.3, fiber.z);
       float hole = fiber.w;
       albedo *= mix(0.8, 1.0, hole);
-      color = softboxLight(N, T, albedo, rough, hole, KEY * lit)
-            + threadLight(N, T, albedo, rough, hole, fill, FILL)
+      color = softboxLight(N, T, V, albedo, rough, hole, KEY * lit)
+            + threadLight(N, T, V, albedo, rough, hole, fill, FILL)
             + albedo * sky * ao
-            + fresnel(N.z, F0) * sky * 0.25 * ao * hole;
+            + fresnel(max(dot(N, V), 0.0), F0) * sky * 0.25 * ao * hole;
     } else {
       // Fabric: a fine, matte plain weave.
-      float fine = smoothstep(0.05, 0.02, 1.0 / u_scale);
-      vec2 p = world / 0.18;
-      vec2 cell = floor(p);
-      vec2 f = fract(p) - 0.5;
+      float fine = smoothstep(0.05, 0.02, 1.0 / u_topScale);
+      vec2 w = p.xy / 0.18;
+      vec2 cell = floor(w);
+      vec2 f = fract(w) - 0.5;
       bool warp = mod(cell.x + cell.y, 2.0) < 1.0;
       vec2 tilt = warp ? vec2(-f.x, -f.y * 0.3) : vec2(-f.x * 0.3, -f.y);
       vec3 Nf = normalize(vec3(tilt * 0.25 * fine, 1.0));
@@ -541,8 +594,12 @@
       // render a little larger instead, and let the browser scale it down.
       this.supersample = (window.devicePixelRatio || 1) >= 2 ? 1.25 : 1.75;
       this.maxSize = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE), 4096);
-      this.surface = compile(gl, TUBE_VS, SURFACE_FS);
-      this.light = compile(gl, LIGHT_VS, LIGHT_FS);
+      // Heights in a float buffer can be filtered smoothly for shadows;
+      // without float buffers they're packed into two 8-bit channels.
+      this.floatHeight = !!gl.getExtension("EXT_color_buffer_float");
+      const define = (src) => this.floatHeight ? src.replace("#version 300 es", "#version 300 es\n#define FLOAT_HEIGHT") : src;
+      this.surface = compile(gl, TUBE_VS, define(SURFACE_FS));
+      this.light = compile(gl, LIGHT_VS, define(LIGHT_FS));
 
       this.instances = gl.createBuffer();
       this.colors = gl.createBuffer();
@@ -585,7 +642,7 @@
       gl.bufferData(gl.ARRAY_BUFFER, design.segmentColors, gl.STATIC_DRAW);
     }
 
-    // The surface pass's three buffers, sized to the canvas.
+    // The surface pass's buffers: color, normal, fiber, height.
     surfaceBuffers(w, h) {
       const gl = this.gl;
       if (this.buffers && this.buffers.w === w && this.buffers.h === h) return this.buffers;
@@ -595,47 +652,66 @@
       }
       const fb = gl.createFramebuffer();
       gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-      const textures = [0, 1, 2].map((i) => {
+      const formats = [
+        [gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.LINEAR],
+        [gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.NEAREST],
+        [gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.NEAREST],
+        this.floatHeight ? [gl.R16F, gl.RED, gl.HALF_FLOAT, gl.LINEAR] : [gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, gl.NEAREST],
+      ];
+      const textures = formats.map(([internal, format, type, filter], i) => {
         const tex = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, tex);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, tex, 0);
         return tex;
       });
-      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2]);
+      gl.drawBuffers([0, 1, 2, 3].map((i) => gl.COLOR_ATTACHMENT0 + i));
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       this.buffers = { w, h, fb, textures };
       return this.buffers;
     }
 
-    render({ width, height, scale, offset, fabric }) {
+    render({ width, height, scale, offset, fabric, tilt = 0 }) {
       const gl = this.gl;
       if (gl.isContextLost() || !this.stacked) return;
       const st = this.stacked;
       const zBase = -0.3, zRange = st.maxZ + 0.6;
+      const sn = Math.sin(tilt), cs = Math.cos(tilt);
+
+      // The surface buffers look straight down on the part of the design
+      // this (possibly tilted) view can see, plus room for shadows and
+      // occlusion to reach in from just outside it.
+      const pad = 1.5;
+      const x0 = -offset[0] / scale - pad, x1 = (width - offset[0]) / scale + pad;
+      const y0 = (-offset[1] / scale + zBase * sn) / cs - pad;
+      const y1 = ((height - offset[1]) / scale + (zBase + zRange) * sn) / cs + pad;
+      const topScale = Math.min(scale, this.maxSize / (x1 - x0), this.maxSize / (y1 - y0));
+      const topW = Math.ceil((x1 - x0) * topScale), topH = Math.ceil((y1 - y0) * topScale);
+      const topOffset = [-x0 * topScale, -y0 * topScale];
       const view = new Float32Array([
-        (2 * scale) / width, 0, 0, 0,
-        0, (-2 * scale) / height, 0, 0,
+        (2 * topScale) / topW, 0, 0, 0,
+        0, (-2 * topScale) / topH, 0, 0,
         0, 0, -1 / zRange, 0,
-        (2 * offset[0]) / width - 1, 1 - (2 * offset[1]) / height, 0, 1,
+        (2 * topOffset[0]) / topW - 1, 1 - (2 * topOffset[1]) / topH, 0, 1,
       ]);
-      const mesh = scale >= NEAR_PX_PER_MM ? this.meshes.near : this.meshes.far;
+      const mesh = topScale >= NEAR_PX_PER_MM ? this.meshes.near : this.meshes.far;
 
       // 1. Surface: no depth test, since where stitches overlap the one sewn
       // later lies on top, so drawing in sewing order is exactly right.
-      const buffers = this.surfaceBuffers(width, height);
+      const buffers = this.surfaceBuffers(topW, topH);
       gl.bindFramebuffer(gl.FRAMEBUFFER, buffers.fb);
-      gl.viewport(0, 0, width, height);
+      gl.viewport(0, 0, topW, topH);
       gl.disable(gl.DEPTH_TEST);
       gl.disable(gl.BLEND);
-      const fabricHeight = (0 - zBase) / zRange;  // bare fabric: flat, at z = 0
+      const bare = (0 - zBase) / zRange;  // bare fabric: flat, at z = 0
       gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
-      gl.clearBufferfv(gl.COLOR, 1, [0.5, 0.5, Math.floor(fabricHeight * 255) / 255, (fabricHeight * 255) % 1]);
+      gl.clearBufferfv(gl.COLOR, 1, [0.5, 0.5, 0, 1]);
       gl.clearBufferfv(gl.COLOR, 2, [0.5, 0.5, 0.5, 1]);
+      gl.clearBufferfv(gl.COLOR, 3, this.floatHeight ? [bare, 0, 0, 1] : [Math.floor(bare * 255) / 255, (bare * 255) % 1, 0, 1]);
       const s = this.surface;
       gl.useProgram(s.program);
       gl.uniformMatrix4fv(s.uniforms.u_view, false, view);
@@ -643,27 +719,30 @@
       gl.uniform1f(s.uniforms.u_rz, RZ);
       gl.uniform1f(s.uniforms.u_ramp, RAMP);
       gl.uniform1f(s.uniforms.u_twist, TWIST_PERIOD);
-      gl.uniform1f(s.uniforms.u_mmPerPx, 1 / scale);
+      gl.uniform1f(s.uniforms.u_mmPerPx, 1 / topScale);
       gl.uniform1f(s.uniforms.u_zBase, zBase);
       gl.uniform1f(s.uniforms.u_zRange, zRange);
       gl.bindVertexArray(mesh.vao);
       gl.drawElementsInstanced(gl.TRIANGLES, mesh.count, gl.UNSIGNED_SHORT, 0, this.count);
       gl.bindVertexArray(null);
 
-      // 2. Light it.
+      // 2. Light it, as seen by the camera.
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, width, height);
       const l = this.light;
       gl.useProgram(l.program);
-      buffers.textures.forEach((tex, i) => {
+      ["u_albedo", "u_normal", "u_fiber", "u_height"].forEach((name, i) => {
         gl.activeTexture(gl.TEXTURE0 + i);
-        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.bindTexture(gl.TEXTURE_2D, buffers.textures[i]);
+        gl.uniform1i(l.uniforms[name], i);
       });
-      gl.uniform1i(l.uniforms.u_albedo, 0);
-      gl.uniform1i(l.uniforms.u_normal, 1);
-      gl.uniform1i(l.uniforms.u_fiber, 2);
       gl.uniform2f(l.uniforms.u_size, width, height);
       gl.uniform1f(l.uniforms.u_scale, scale);
       gl.uniform2f(l.uniforms.u_offset, offset[0], offset[1]);
+      gl.uniform2f(l.uniforms.u_tilt, sn, cs);
+      gl.uniform2f(l.uniforms.u_topSize, topW, topH);
+      gl.uniform1f(l.uniforms.u_topScale, topScale);
+      gl.uniform2f(l.uniforms.u_topOffset, topOffset[0], topOffset[1]);
       gl.uniform1f(l.uniforms.u_zBase, zBase);
       gl.uniform1f(l.uniforms.u_zRange, zRange);
       gl.uniform3f(l.uniforms.u_fabric, ...fabric.map((c) => c / 255));
@@ -727,7 +806,16 @@
       }
       if (!this.renderer) this.renderer = new CanvasRenderer(this.newCanvas());
       this.element.dataset.renderer = this.renderer.kind;
-      this.element.append(this.canvas, this.hint);
+      // Tilting the design toward you (WebGL only), in degrees.
+      this.tilt = 0;
+      this.tiltControl = document.createElement("label");
+      this.tiltControl.className = "stitch-tilt";
+      const range = document.createElement("input");
+      Object.assign(range, { type: "range", min: 0, max: 60, value: 0 });
+      range.addEventListener("input", () => { this.tilt = Number(range.value); this.draw(); });
+      this.tiltControl.append("Tilt", range);
+      this.tiltControl.hidden = this.renderer.kind !== "webgl";
+      this.element.append(this.canvas, this.hint, this.tiltControl);
 
       this.design = null;
       this.zoom = 1;
@@ -752,6 +840,8 @@
       this.renderer = new CanvasRenderer(this.newCanvas());
       old.replaceWith(this.canvas);
       this.element.dataset.renderer = this.renderer.kind;
+      this.tilt = 0;
+      this.tiltControl.hidden = true;
       this.listen();
       if (this.design) this.renderer.setDesign(this.design);
       this.draw();
@@ -777,6 +867,9 @@
 
     maxZoom() { return Math.max(1, MAX_PX_PER_MM / this.fitScale()); }
 
+    // Tilted, the design's depth is foreshortened on screen by this much.
+    tiltCos() { return Math.cos((this.tilt * Math.PI) / 180); }
+
     draw() {
       if (!this.frame) this.frame = requestAnimationFrame(() => { this.frame = 0; this.paint(); });
     }
@@ -796,12 +889,14 @@
         this.canvas.height = height;
       }
       const scale = this.fitScale() * this.zoom * k;
-      const offset = [width / 2 - this.center[0] * scale, height / 2 - this.center[1] * scale];
+      const offset = [width / 2 - this.center[0] * scale, height / 2 - this.center[1] * this.tiltCos() * scale];
       this.renderer.render({
         width, height, scale, offset,
         fabric: this.dark.matches ? FABRIC.dark : FABRIC.light,
+        tilt: (this.tilt * Math.PI) / 180,
       });
       this.element.dataset.zoom = this.zoom.toFixed(2);
+      this.element.dataset.tilt = String(this.tilt);
       this.element.dataset.rendered = "1";
       const touch = matchMedia("(pointer: coarse)").matches;
       this.hint.textContent = this.zoom > 1.01
@@ -818,7 +913,7 @@
       const dx = x - this.element.clientWidth / 2;
       const dy = y - this.element.clientHeight / 2;
       this.center[0] += dx / before - dx / after;
-      this.center[1] += dy / before - dy / after;
+      this.center[1] += (dy / before - dy / after) / this.tiltCos();
       if (this.zoom === 1) this.center = [this.design.width / 2, this.design.height / 2];
       this.clampCenter();
       this.draw();
@@ -827,7 +922,7 @@
     panBy(dx, dy) {
       const s = this.fitScale() * this.zoom;
       this.center[0] -= dx / s;
-      this.center[1] -= dy / s;
+      this.center[1] -= dy / (s * this.tiltCos());
       this.clampCenter();
       this.draw();
     }

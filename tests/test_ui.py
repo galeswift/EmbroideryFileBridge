@@ -377,6 +377,27 @@ def test_viewer_falls_back_to_a_2d_canvas(site):
     assert 0.02 < site.page.evaluate(THREAD_COVERAGE_JS) < 0.9
 
 
+def test_tilting_the_design(site):
+    has_webgl = site.page.evaluate("!!document.createElement('canvas').getContext('webgl2')")
+    if not has_webgl:
+        pytest.skip("no WebGL2 in this browser")
+    make_pes(site.staging / "rose.pes")
+    view = open_stitches(site, "rose.pes")
+    slider = site.page.locator(".stitch-tilt input")
+    assert slider.is_visible()
+    slider.fill("45")
+    site.page.wait_for_function("document.querySelector('.stitch-view').dataset.tilt === '45'")
+    assert 0.02 < site.page.evaluate(THREAD_COVERAGE_JS) < 0.9  # still drawn
+    assert view.get_attribute("data-renderer") == "webgl"
+
+
+def test_no_tilt_without_webgl(site):
+    site.page.add_init_script("window.FORCE_CANVAS_RENDERER = true")
+    make_pes(site.staging / "rose.pes")
+    open_stitches(site, "rose.pes")
+    assert not site.page.locator(".stitch-tilt").is_visible()
+
+
 def test_viewer_zooms_and_double_click_fits_again(site):
     make_pes(site.staging / "rose.pes")
     view = open_stitches(site, "rose.pes")

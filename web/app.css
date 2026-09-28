@@ -360,6 +360,12 @@ dialog.small p:empty { display: none; }
 .stitch-view { position: absolute; inset: 0; overflow: hidden; }
 .stitch-view canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
 .stitch-view canvas:active { cursor: grabbing; }
+.stitch-tilt {
+  position: absolute; left: 12px; top: 12px;
+  display: flex; align-items: center; gap: 8px; padding: 4px 12px; border-radius: 999px;
+  background: rgb(20 18 16 / 55%); color: #fff; font-size: 12px; font-weight: 600;
+}
+.stitch-tilt input { width: 110px; accent-color: #fff; }
 .stitch-hint {
   position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
   padding: 4px 12px; border-radius: 999px; white-space: nowrap; pointer-events: none;

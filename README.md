@@ -45,7 +45,8 @@ none of those limits.
      as a 3D strand of thread, stacked in sewing order the way the
      machine lays them down, and lights it (WebGL, in your browser; a
      simpler drawing on devices without it). Scroll or pinch to zoom right in
-     on the stitches, drag to look around, double-click to fit.
+     on the stitches, drag to look around, double-click to fit, and
+     tilt it with the slider to see it at an angle.
    * **Folders**: create them, upload whole folders (button or drag and
      drop), move things between them. Each folder's card previews a few
      of the designs inside it.
