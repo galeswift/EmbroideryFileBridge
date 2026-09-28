@@ -26,7 +26,7 @@
   const RX = 0.25;              // mm: half the width thread spreads to
   const RZ = 0.11;              // mm: half its thickness, flattened by tension
   const RAMP = 0.45;            // mm over which it climbs out of a needle hole
-  const HOLE_DIP = RZ * 0.8;    // mm a stitch sinks at its needle holes, at most
+  const HOLE_DIP = RZ * 0.35;   // mm a stitch sinks at its needle holes, at most
   const MAX_STACK = 0.55;       // mm: how high layers of stitching can pile up
   const NEIGHBORS = 3;          // stitches just before this one lie beside it, not under it
   const TWIST_PERIOD = 0.5;     // mm per turn of the thread's twist
@@ -173,7 +173,7 @@
           const zc = zEnd + (zTop - zEnd) * rise;
           const lift = qx * nx + qy * ny >= 0 ? liftL : liftR;
           const g = cy * gw + cx;
-          const top = zc + RZ * Math.sqrt(1 - d * d) + lift * rise * Math.pow(d, 1.5);
+          const top = zc + RZ * Math.sqrt(1 - d * d) + lift * (0.7 + 0.3 * rise) * Math.pow(d, 1.5);
           if (top > full[g]) { full[g] = top; fullOwner[g] = i; }
           if (d <= 0.5 && zc + RZ > core[g]) { core[g] = zc + RZ; coreOwner[g] = i; }
         }
@@ -228,12 +228,12 @@
     // No two stitches are quite alike: tension varies their width and
     // thickness, and a strand bows a little between its holes.
     float seed = a_z.w;
-    float rx = u_rx * mix(0.8, 1.0, rise) * (0.9 + 0.2 * fract(seed * 37.13));
-    float rz = u_rz * mix(0.75, 1.0, rise) * (0.85 + 0.3 * fract(seed * 91.71));
+    float rx = u_rx * mix(0.97, 1.0, rise) * (0.9 + 0.2 * fract(seed * 37.13));
+    float rz = u_rz * mix(0.9, 1.0, rise) * (0.85 + 0.3 * fract(seed * 91.71));
     float bow = (fract(seed * 53.37) - 0.5) * 0.08 * min(mid, 1.0) * sin(3.14159 * s / len);
     float c = cos(a_vert.z), sn = sin(a_vert.z);
     // Each edge rides up over any older strand it overlaps.
-    float lift = (c >= 0.0 ? a_lift.x : a_lift.y) * rise;
+    float lift = (c >= 0.0 ? a_lift.x : a_lift.y) * mix(0.7, 1.0, rise);
     float ac = abs(c);
     vec3 pos = vec3(a_seg.xy + t * s + n * bow, centerZ(s, len)) + side * c * rx + up * sn * rz
              + vec3(0.0, 0.0, lift * pow(ac, 1.5));
