@@ -326,7 +326,7 @@ STACK_SATIN_JS = """() => {
   segs.push(2, -1, 2.2, 41, 0.5);
   const n = segs.length / 5;
   const st = StitchView.stack({ width: 5, height: 42, segments: new Float32Array(segs), segmentCount: n });
-  const top = (i) => st.instances[i * 8 + 6];
+  const top = (i) => st.instances[i * st.stride + 6];
   let satin = 0;
   for (let i = 0; i < 400; i++) satin = Math.max(satin, top(i));
   return { satin, over: top(400), maxZ: st.maxZ };
@@ -339,6 +339,27 @@ def test_stacking_satin_lies_flat_and_later_stitches_lie_on_top(site):
     assert z["satin"] < 0.2  # side by side, not climbing each other
     assert z["over"] > z["satin"] + 0.05  # resting on the satin
     assert z["maxZ"] < 1
+
+
+STACK_OVERLAP_JS = """() => {
+  // Two fill rows 0.4 mm apart (thread is ~0.5 mm wide, so they overlap),
+  // with other stitching sewn in between; then the same, back to back.
+  const row = (y) => [0, y, 4, y, 0.5];
+  const elsewhere = [10, 0, 14, 0, 0.5];
+  const segs = [...row(1), ...elsewhere, ...elsewhere, ...elsewhere, ...elsewhere, ...row(1.4),
+                ...row(3), ...row(3.4)];
+  const st = StitchView.stack({ width: 15, height: 5, segments: new Float32Array(segs), segmentCount: segs.length / 5 });
+  const lifts = (i) => [st.instances[i * st.stride + 8], st.instances[i * st.stride + 9]];
+  return { later: lifts(5), backToBack: lifts(7) };
+}"""
+
+
+def test_stacking_edges_ride_over_older_overlapping_thread(site):
+    open_page(site)
+    z = site.page.evaluate(STACK_OVERLAP_JS)
+    left, right = z["later"]  # the row's right edge (toward y = 1) overlaps the older row
+    assert right > 0.05 and left == 0
+    assert z["backToBack"] == [0, 0]  # sewn right after: side by side, as in satin
 
 
 def test_viewer_uses_webgl_when_available(site):
