@@ -838,21 +838,9 @@ function showViewer(i) {
   $("#viewer-prev").disabled = i === 0;
   $("#viewer-next").disabled = i === viewer.files.length - 1;
 
-  const art = $("#viewer-art");
-  const key = previewKey(e);
-  const canPreview = e.design && state.status && state.status.previews;
-  const p = previews.get(key);
-  art.classList.remove("loading");
-  if (canPreview && !previews.has(key)) {
-    art.replaceChildren();
-    art.classList.add("loading");
-    getPreview(e).then(() => { if (viewer.entry === e) showViewer(viewer.index); });
-  } else if (p) {
-    art.innerHTML = p.svg;
-  } else {
-    art.replaceChildren(placeholder(e, true));
-  }
+  renderArt(e);
 
+  const p = previews.get(previewKey(e));
   const facts = [
     ["Status", e.synced
       ? h("span", { class: "chip ok" }, icon("check"), "On machine")
@@ -873,6 +861,70 @@ function showViewer(i) {
     );
   }
   $("#viewer-facts").replaceChildren(...facts.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]));
+}
+
+// The big picture: the quick SVG preview first, then every stitch drawn as
+// thread (stitches.js) once that data has arrived. Only redrawn when the
+// design changes, so the status poll doesn't reset zooming.
+const stitchData = new Map();  // preview key -> parsed stitches, or null
+const stitchFetches = new Map();
+let stitchView = null;
+
+function getStitches(entry) {
+  const key = previewKey(entry);
+  if (!stitchFetches.has(key)) {
+    stitchFetches.set(key, (async () => {
+      let design = null;
+      try {
+        const res = await fetch(`/api/stitches?path=${encodeURIComponent(entry.path)}`);
+        if (res.ok) design = StitchView.parse(await res.arrayBuffer());
+      } catch { /* keep the SVG preview */ }
+      // Dense designs are a few MB once unpacked; keep only the last few.
+      if (stitchData.size >= 6) {
+        const oldest = stitchData.keys().next().value;
+        stitchData.delete(oldest);
+        stitchFetches.delete(oldest);
+      }
+      stitchData.set(key, design);
+    })());
+  }
+  return stitchFetches.get(key);
+}
+
+function renderArt(e) {
+  const art = $("#viewer-art");
+  const key = previewKey(e);
+  const again = () => { if (viewer.entry && previewKey(viewer.entry) === key) renderArt(viewer.entry); };
+  if (!(e.design && state.status && state.status.previews)) {
+    return setArt(art, key, "none", () => art.replaceChildren(placeholder(e, true)));
+  }
+  const design = stitchData.get(key);
+  if (design) {
+    return setArt(art, key, "stitches", () => {
+      stitchView = stitchView || new StitchView.View();
+      art.replaceChildren(stitchView.element);
+      stitchView.show(design);
+    });
+  }
+  if (!stitchData.has(key)) getStitches(e).then(again);
+  if (!previews.has(key)) {
+    setArt(art, key, "loading", () => art.replaceChildren());
+    getPreview(e).then(() => { if (viewer.entry === e) showViewer(viewer.index); });
+    return;
+  }
+  const p = previews.get(key);
+  setArt(art, key, p ? "svg" : "none", () => {
+    if (p) art.innerHTML = p.svg;
+    else art.replaceChildren(placeholder(e, true));
+  });
+}
+
+function setArt(art, key, stage, fill) {
+  if (art.dataset.key === key && art.dataset.stage === stage) return;
+  art.dataset.key = key;
+  art.dataset.stage = stage;
+  art.classList.toggle("loading", stage === "loading");
+  fill();
 }
 
 $("#viewer").addEventListener("click", (ev) => {

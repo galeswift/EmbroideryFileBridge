@@ -1,7 +1,9 @@
 """Tests for the web UI's JSON API (embroidery-web.py)."""
+import gzip
 import io
 import json
 import os
+import struct
 import time
 
 import pytest
@@ -367,6 +369,99 @@ def test_delete_removes_cached_preview(web, pes_bytes):
     assert (web.previews / "Box" / "rose.pes.json").exists()
     web.client.post("/api/delete", json={"paths": ["Box"]})
     assert not (web.previews / "Box").exists()
+
+
+def test_preview_from_an_older_version_is_redrawn(web, pes_bytes):
+    upload(web.client, [("rose.pes", pes_bytes)])
+    st = (web.staging / "rose.pes").stat()
+    stale = {"stamp": web.mod.stamp(st), "data": {"svg": "<svg>old</svg>"}}
+    (web.previews / "rose.pes.json").write_text(json.dumps(stale))
+    svg = web.client.get("/api/preview", query_string={"path": "rose.pes"}).get_json()["svg"]
+    assert "old" not in svg and "<polyline" in svg
+
+
+# ------------------------------------------------------------ stitches
+
+def parse_stitches(data):
+    """Decode /api/stitches (see encode_stitches) into header and points."""
+    assert data[:4] == b"EBS1"
+    (length,) = struct.unpack("<I", data[4:8])
+    assert (8 + length) % 4 == 0
+    header = json.loads(data[8:8 + length])
+    raw = data[8 + length:]
+    coords = struct.unpack(f"<{len(raw) // 2}h", raw)
+    return header, list(zip(coords[::2], coords[1::2]))
+
+
+def test_stitches_include_every_stitch_in_sewing_order(web, pes_bytes):
+    pyembroidery = pytest.importorskip("pyembroidery")
+    upload(web.client, [("rose.pes", pes_bytes)])
+    res = web.client.get("/api/stitches", query_string={"path": "rose.pes"})
+    assert res.status_code == 200 and res.mimetype == "application/octet-stream"
+    header, points = parse_stitches(res.data)
+
+    pattern = pyembroidery.read(str(web.staging / "rose.pes"))
+    blocks = list(pattern.get_as_stitchblock())
+    assert [n for _, n in header["runs"]] == [len(b) for b, _ in blocks]
+    assert len(points) == sum(len(b) for b, _ in blocks)
+    # (PES snaps colors to Brother's palette, so compare with what's in the file.)
+    assert header["colors"] == [t.hex_color() for t in pattern.threadlist] and len(header["colors"]) == 2
+    assert [c for c, _ in header["runs"]] == [0, 1]
+    # Relative to the design's top-left corner, in 0.1 mm.
+    min_x, min_y, *_ = pattern.bounds()
+    (x0, y0, *_), = blocks[0][0][:1]
+    assert points[0] == (round(x0 - min_x), round(y0 - min_y))
+    assert min(x for x, _ in points) == 0 and min(y for _, y in points) == 0
+    assert header["width_mm"] == 40.0 and header["height_mm"] == 20.0
+    assert max(x for x, _ in points) == 400
+
+
+def test_stitches_are_gzipped_for_browsers(web, pes_bytes):
+    pytest.importorskip("pyembroidery")
+    upload(web.client, [("rose.pes", pes_bytes)])
+    plain = web.client.get("/api/stitches", query_string={"path": "rose.pes"})
+    zipped = web.client.get("/api/stitches", query_string={"path": "rose.pes"},
+                            headers={"Accept-Encoding": "gzip, deflate"})
+    assert "Content-Encoding" not in plain.headers
+    assert zipped.headers["Content-Encoding"] == "gzip"
+    assert gzip.decompress(zipped.data) == plain.data
+
+
+def test_stitches_are_cached_until_file_changes(web, pes_bytes, monkeypatch):
+    pytest.importorskip("pyembroidery")
+    upload(web.client, [("rose.pes", pes_bytes)])
+    first = web.client.get("/api/stitches", query_string={"path": "rose.pes"}).data
+    assert (web.previews / "rose.pes.stitches").exists()
+
+    calls = []
+    real = web.mod.encode_stitches
+    monkeypatch.setattr(web.mod, "encode_stitches", lambda p: calls.append(p) or real(p))
+    assert web.client.get("/api/stitches", query_string={"path": "rose.pes"}).data == first
+    assert calls == []  # served from cache
+
+    later = time.time() + 5
+    os.utime(web.staging / "rose.pes", (later, later))
+    web.client.get("/api/stitches", query_string={"path": "rose.pes"})
+    assert len(calls) == 1
+
+
+def test_stitches_of_non_design_is_404(web):
+    pytest.importorskip("pyembroidery")
+    upload(web.client, [("notes.txt", b"hello"), ("broken.pes", b"not really")])
+    assert web.client.get("/api/stitches", query_string={"path": "notes.txt"}).status_code == 404
+    assert web.client.get("/api/stitches", query_string={"path": "broken.pes"}).status_code == 404
+    assert web.client.get("/api/stitches", query_string={"path": "missing.pes"}).status_code == 404
+
+
+def test_rename_and_delete_drop_cached_stitches(web, pes_bytes):
+    pytest.importorskip("pyembroidery")
+    upload(web.client, [("rose.pes", pes_bytes), ("daisy.pes", pes_bytes)])
+    for name in ("rose.pes", "daisy.pes"):
+        web.client.get("/api/stitches", query_string={"path": name})
+    web.client.post("/api/rename", json={"path": "rose.pes", "name": "Red rose.pes"})
+    web.client.post("/api/delete", json={"paths": ["daisy.pes"]})
+    assert not (web.previews / "rose.pes.stitches").exists()
+    assert not (web.previews / "daisy.pes.stitches").exists()
 
 
 # ------------------------------------------------------------ security

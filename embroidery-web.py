@@ -11,12 +11,16 @@ Intentionally has no authentication, matching the guest-only trust
 model of the Samba share it replaces: if your network isn't trusted,
 put this behind a reverse proxy or VPN rather than exposing it further.
 """
+import gzip
 import json
 import os
 import re
 import shutil
+import struct
+import sys
 import time
 import unicodedata
+from array import array
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
@@ -162,11 +166,11 @@ def forget(rel):
     has not been copied to its new location on the machine yet, so its
     marker must not follow it.
     """
-    for base, suffix in ((STATUS_DIR, ""), (PREVIEW_DIR, ".json")):
+    for base, suffixes in ((STATUS_DIR, ("",)), (PREVIEW_DIR, (".json", ".stitches"))):
         target = base / rel
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
-        for p in (target, base / (rel + suffix)):
+        for p in (target, *(base / (rel + s) for s in suffixes)):
             if p.is_file():
                 p.unlink(missing_ok=True)
 
@@ -208,6 +212,17 @@ def overall_status():
 
 # ------------------------------------------------------------- previews
 
+# Bump when render_preview's output changes, so cached previews are redrawn.
+PREVIEW_VERSION = 2
+# Embroidery thread lies about 0.4 mm wide; pyembroidery works in 0.1 mm.
+THREAD_WIDTH_UNITS = 4
+
+
+def thread_color(thread):
+    color = thread.hex_color() if thread is not None else None
+    return color if re.fullmatch(r"#[0-9a-fA-F]{6}", color or "") else "#555555"
+
+
 def render_preview(path):
     pattern = pyembroidery.read(str(path))
     if pattern is None or not pattern.count_stitches():
@@ -226,14 +241,14 @@ def render_preview(path):
         pts = block[::step] if len(block) > step * 2 else block
         if len(pts) < 2:
             continue
-        color = thread.hex_color() if thread is not None else "#555555"
-        if not re.fullmatch(r"#[0-9a-fA-F]{6}", color or ""):
-            color = "#555555"
-        d = " ".join(f"{round(x - min_x)},{round(y - min_y)}" for x, y, *_ in pts)
+        color = thread_color(thread)
+        d =" ".join(f"{round(x - min_x)},{round(y - min_y)}" for x, y, *_ in pts)
         paths.append(f'<polyline points="{d}" stroke="{color}"/>')
 
     pad = max(width, height) * 0.04
-    stroke = max(width, height) / 220
+    # Real thread width, so fills read as solid thread; thicker only where
+    # a big design would otherwise turn into hairlines at thumbnail size.
+    stroke = max(THREAD_WIDTH_UNITS, max(width, height) / 300)
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
         f'viewBox="{-pad:.0f} {-pad:.0f} {width + 2 * pad:.0f} {height + 2 * pad:.0f}">'
@@ -253,6 +268,47 @@ def render_preview(path):
         "width_mm": round(width / 10, 1),
         "height_mm": round(height / 10, 1),
     }
+
+
+STITCHES_MAGIC = b"EBS1"
+
+
+def encode_stitches(path):
+    """Every stitch of a design, for the page's own renderer.
+
+    Binary, as JSON would be several times bigger for a dense design:
+
+        "EBS1", uint32 header length, header (JSON), padding to 4 bytes,
+        then int16 x, y pairs in 0.1 mm from the design's top-left corner.
+
+    The header gives the design size, its thread colors, and its runs in
+    sewing order: [color index, point count]. A run is stitches sewn one
+    after another; a jump, trim or color change starts a new one. All
+    little-endian.
+    """
+    pattern = pyembroidery.read(str(path))
+    if pattern is None or not pattern.count_stitches():
+        return None
+    min_x, min_y, max_x, max_y = pattern.bounds()
+    colors, runs, points = [], [], array("h")
+    for block, thread in pattern.get_as_stitchblock():
+        color = thread_color(thread)
+        if color not in colors:
+            colors.append(color)
+        runs.append([colors.index(color), len(block)])
+        for x, y, *_ in block:
+            points.append(max(-32768, min(32767, round(x - min_x))))
+            points.append(max(-32768, min(32767, round(y - min_y))))
+    header = json.dumps({
+        "width_mm": round((max_x - min_x) / 10, 1),
+        "height_mm": round((max_y - min_y) / 10, 1),
+        "colors": colors,
+        "runs": runs,
+    }).encode()
+    header += b" " * (-(8 + len(header)) % 4)
+    if sys.byteorder != "little":
+        points.byteswap()
+    return STITCHES_MAGIC + struct.pack("<I", len(header)) + header + points.tobytes()
 
 
 FOLDER_SAMPLES = 4
@@ -502,7 +558,7 @@ def api_preview():
         cached = json.loads(cache.read_text())
     except (OSError, ValueError):
         cached = {}
-    if cached.get("stamp") == stamp(st):
+    if cached.get("stamp") == stamp(st) and cached.get("version") == PREVIEW_VERSION:
         data = cached.get("data")
     else:
         # Rendering is the slow part on a Pi Zero, so cache the result
@@ -512,10 +568,41 @@ def api_preview():
         except Exception:
             data = None
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps({"stamp": stamp(st), "data": data}))
+        cache.write_text(json.dumps({"stamp": stamp(st), "version": PREVIEW_VERSION, "data": data}))
     if not data:
         abort(404, "No preview.")
     return jsonify(data)
+
+
+@app.get("/api/stitches")
+def api_stitches():
+    p = resolve(request.args.get("path", ""))
+    if pyembroidery is None or not p.is_file():
+        abort(404, "No preview.")
+    st = p.stat()
+    # Cached gzipped, as "<stamp>\n<data>"; empty data means "not a design".
+    cache = PREVIEW_DIR / (rel_of(p) + ".stitches")
+    try:
+        cached_stamp, _, data = cache.read_bytes().partition(b"\n")
+    except OSError:
+        cached_stamp, data = b"", b""
+    if cached_stamp.decode(errors="replace") != stamp(st):
+        try:
+            raw = encode_stitches(p)
+        except Exception:
+            raw = None
+        data = gzip.compress(raw, compresslevel=6, mtime=0) if raw else b""
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(stamp(st).encode() + b"\n" + data)
+    if not data:
+        abort(404, "No preview.")
+    if "gzip" in request.headers.get("Accept-Encoding", ""):
+        res = app.response_class(data, mimetype="application/octet-stream")
+        res.headers["Content-Encoding"] = "gzip"
+    else:
+        res = app.response_class(gzip.decompress(data), mimetype="application/octet-stream")
+    res.headers["Vary"] = "Accept-Encoding"
+    return res
 
 
 if __name__ == "__main__":

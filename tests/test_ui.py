@@ -20,7 +20,8 @@ def browser():
         last_error = None
         for kwargs in ({}, {"channel": "chrome"}):
             try:
-                b = p.chromium.launch(**kwargs)
+                # A software GPU, so the WebGL stitch renderer runs headless.
+                b = p.chromium.launch(args=["--enable-unsafe-swiftshader", "--use-angle=swiftshader"], **kwargs)
                 break
             except Exception as err:  # browser not installed
                 last_error = err
@@ -87,7 +88,7 @@ def test_viewer_shows_design_details(site, pes_bytes):
     open_page(site)
     card(site, "rose.pes").locator(".thumb svg").wait_for()  # thumbnail rendered
     card(site, "rose.pes").click()
-    site.page.wait_for_selector("#viewer[open] .viewer-art svg")
+    site.page.wait_for_selector("#viewer[open] #viewer-facts .swatch")
     facts = site.page.inner_text("#viewer-facts")
     assert "Stitches" in facts and "Design size" in facts
     assert site.page.locator("#viewer-facts .swatch").count() == 2
@@ -278,5 +279,87 @@ def test_design_that_fits_says_so(site):
     make_pes(site.staging / "Small.pes", width_mm=40)
     open_page(site)
     card(site, "Small.pes").click()
-    site.page.wait_for_selector("#viewer[open] .viewer-art svg")
+    site.page.wait_for_selector("#viewer[open] #viewer-facts .swatch")
     assert "Fits the 200 × 200 mm hoop" in site.page.inner_text("#viewer-facts")
+
+
+# ------------------------------------------------------ stitch renderer
+
+# Share of the canvas that isn't plain fabric (the top-left pixel).
+THREAD_COVERAGE_JS = """() => {
+  const src = document.querySelector('.stitch-view canvas');
+  const c = document.createElement('canvas');
+  c.width = 200; c.height = 200;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(src, 0, 0, 200, 200);
+  const d = ctx.getImageData(0, 0, 200, 200).data;
+  let differ = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    if (Math.abs(d[i] - d[0]) + Math.abs(d[i + 1] - d[1]) + Math.abs(d[i + 2] - d[2]) > 60) differ++;
+  }
+  return differ / (d.length / 4);
+}"""
+
+
+def open_stitches(site, name):
+    open_page(site)
+    card(site, name).click()
+    site.page.wait_for_selector("#viewer-art[data-stage=stitches] .stitch-view[data-rendered]")
+    return site.page.locator(".stitch-view")
+
+
+def test_viewer_draws_the_stitches(site):
+    make_pes(site.staging / "rose.pes")
+    view = open_stitches(site, "rose.pes")
+    assert view.get_attribute("data-renderer") in ("webgl", "canvas")
+    assert 0.02 < site.page.evaluate(THREAD_COVERAGE_JS) < 0.9
+
+
+def test_viewer_uses_webgl_when_available(site):
+    has_webgl = site.page.evaluate("!!document.createElement('canvas').getContext('webgl2')")
+    if not has_webgl:
+        pytest.skip("no WebGL2 in this browser")
+    make_pes(site.staging / "rose.pes")
+    assert open_stitches(site, "rose.pes").get_attribute("data-renderer") == "webgl"
+
+
+def test_viewer_falls_back_to_a_2d_canvas(site):
+    site.page.add_init_script("window.FORCE_CANVAS_RENDERER = true")
+    make_pes(site.staging / "rose.pes")
+    assert open_stitches(site, "rose.pes").get_attribute("data-renderer") == "canvas"
+    assert 0.02 < site.page.evaluate(THREAD_COVERAGE_JS) < 0.9
+
+
+def test_viewer_zooms_and_double_click_fits_again(site):
+    make_pes(site.staging / "rose.pes")
+    view = open_stitches(site, "rose.pes")
+    assert "zoom" in site.page.inner_text(".stitch-hint")
+    view.hover()
+    for _ in range(5):
+        site.page.mouse.wheel(0, -200)
+    site.page.wait_for_function("document.querySelector('.stitch-view').dataset.zoom > 3")
+    assert "fit" in site.page.inner_text(".stitch-hint")
+    view.dblclick()
+    site.page.wait_for_function("document.querySelector('.stitch-view').dataset.zoom === '1.00'")
+
+
+def test_status_refresh_keeps_the_zoom(site):
+    make_pes(site.staging / "rose.pes")
+    view = open_stitches(site, "rose.pes")
+    view.hover()
+    for _ in range(5):
+        site.page.mouse.wheel(0, -200)
+    site.page.wait_for_function("document.querySelector('.stitch-view').dataset.zoom > 3")
+    site.page.evaluate("showViewer(viewer.index)")  # what a status poll does
+    site.page.wait_for_timeout(100)
+    assert float(view.get_attribute("data-zoom")) > 3
+
+
+def test_viewer_moves_to_the_next_design(site):
+    make_pes(site.staging / "a.pes", width_mm=40)
+    make_pes(site.staging / "b.pes", width_mm=150)
+    open_stitches(site, "a.pes")
+    site.page.keyboard.press("ArrowRight")
+    site.page.wait_for_function("document.querySelector('#viewer-art').dataset.key.startsWith('b.pes|')")
+    site.page.wait_for_selector("#viewer-art[data-stage=stitches]")
+    assert site.page.inner_text("#viewer-name") == "b.pes"
